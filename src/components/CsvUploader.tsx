@@ -115,7 +115,10 @@ export default function CsvUploader() {
 
     for (let i = 0; i < data.length; i += BATCH) {
       const batch = data.slice(i, i + BATCH);
-      const { error } = await supabase.from("phone_rates").insert(batch);
+      const { error } = await supabase.from("phone_rates").upsert(batch, {
+        onConflict: "country,phone_company,prefix",
+        ignoreDuplicates: false,
+      });
       if (error) {
         setParseErrors((prev) => [
           ...prev,
