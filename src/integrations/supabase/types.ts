@@ -14,32 +14,155 @@ export type Database = {
   }
   public: {
     Tables: {
+      countries: {
+        Row: {
+          id: string
+          nombre: string
+          region_id: string | null
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          nombre: string
+          region_id?: string | null
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          nombre?: string
+          region_id?: string | null
+          created_at?: string
+        }
+        Relationships: [
+          { foreignKeyName: "countries_region_id_fkey"; columns: ["region_id"]; referencedRelation: "regions"; referencedColumns: ["id"] }
+        ]
+      }
+      csv_uploads: {
+        Row: {
+          id: string
+          file_name: string
+          created_at: string
+          vendor_id: string | null
+        }
+        Insert: {
+          id?: string
+          file_name: string
+          created_at?: string
+          vendor_id?: string | null
+        }
+        Update: {
+          id?: string
+          file_name?: string
+          created_at?: string
+          vendor_id?: string | null
+        }
+        Relationships: [
+          { foreignKeyName: "csv_uploads_vendor_id_fkey"; columns: ["vendor_id"]; referencedRelation: "vendors"; referencedColumns: ["id"] }
+        ]
+      }
+      vendors: {
+        Row: {
+          id: string
+          nombre: string
+          descripcion: string | null
+          estado: string
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          nombre: string
+          descripcion?: string | null
+          estado?: string
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          nombre?: string
+          descripcion?: string | null
+          estado?: string
+          created_at?: string
+        }
+        Relationships: []
+      }
+      saved_quotations: {
+        Row: {
+          id: string
+          name: string | null
+          vendor_ids: string[]
+          snapshot: Json
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          name?: string | null
+          vendor_ids?: string[]
+          snapshot: Json
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          name?: string | null
+          vendor_ids?: string[]
+          snapshot?: Json
+          created_at?: string
+        }
+        Relationships: []
+      }
+      regions: {
+        Row: {
+          id: string
+          nombre: string
+          descripcion: string | null
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          nombre: string
+          descripcion?: string | null
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          nombre?: string
+          descripcion?: string | null
+          created_at?: string
+        }
+        Relationships: []
+      }
       phone_rates: {
         Row: {
           country: string
           created_at: string
           id: string
-          phone_company: string
+          network: string
           prefix: string
-          price: number
+          rate: number
+          rate_type: string
+          upload_id: string
         }
         Insert: {
           country: string
           created_at?: string
           id?: string
-          phone_company: string
+          network: string
           prefix: string
-          price: number
+          rate: number
+          rate_type?: string
+          upload_id: string
         }
         Update: {
           country?: string
           created_at?: string
           id?: string
-          phone_company?: string
+          network?: string
           prefix?: string
-          price?: number
+          rate?: number
+          rate_type?: string
+          upload_id?: string
         }
-        Relationships: []
+        Relationships: [
+          { foreignKeyName: "phone_rates_upload_id_fkey"; columns: ["upload_id"]; referencedRelation: "csv_uploads"; referencedColumns: ["id"] }
+        ]
       }
     }
     Views: {

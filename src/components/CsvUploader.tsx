@@ -1,5 +1,6 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { Upload, FileText, CheckCircle, AlertCircle, Loader2, Trash2, X } from "lucide-react";
+import * as XLSX from "xlsx";
 import { supabase } from "@/integrations/supabase/client";
 import {
   AlertDialog,
@@ -11,12 +12,21 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 interface PhoneRate {
   country: string;
-  phone_company: string;
+  network: string;
   prefix: string;
-  price: number;
+  rate: number;
+  rate_type?: string;
 }
 
 interface ParseError {
@@ -36,19 +46,8 @@ function parseCSV(text: string): { data: PhoneRate[]; errors: ParseError[] } {
     return { data, errors };
   }
 
-  const header = lines[0].toLowerCase().split(",").map((h) => h.trim().replace(/"/g, ""));
-  const expectedCols = ["country", "phone company", "prefix", "price"];
-
-  const colMap: Record<string, number> = {};
-  for (const expected of expectedCols) {
-    const idx = header.findIndex(
-      (h) =>
-        h === expected ||
-        h === expected.replace(" ", "_") ||
-        h === expected.replace(" ", "")
-    );
-    colMap[expected] = idx;
-  }
+  const header = lines[0].split(",").map((h) => h.trim().replace(/"/g, ""));
+  const colMap = buildColMap(header);
 
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i].trim();
@@ -57,25 +56,125 @@ function parseCSV(text: string): { data: PhoneRate[]; errors: ParseError[] } {
     const cols = line.split(",").map((c) => c.trim().replace(/"/g, ""));
 
     const country = colMap["country"] >= 0 ? cols[colMap["country"]] : cols[0];
-    const phone_company = colMap["phone company"] >= 0 ? cols[colMap["phone company"]] : cols[1];
+    const network = colMap["phone company"] >= 0 ? cols[colMap["phone company"]] : cols[1];
     const prefix = colMap["prefix"] >= 0 ? cols[colMap["prefix"]] : cols[2];
-    const priceRaw = colMap["price"] >= 0 ? cols[colMap["price"]] : cols[3];
+    const rateRaw = colMap["price"] >= 0 ? cols[colMap["price"]] : cols[3];
 
-    if (!country || !phone_company || !prefix || !priceRaw) {
+    if (!country || !network || !prefix || !rateRaw) {
       errors.push({ row: i + 1, message: `Row ${i + 1}: incomplete data.` });
       continue;
     }
 
-    const price = parseFloat(priceRaw);
-    if (isNaN(price)) {
-      errors.push({ row: i + 1, message: `Row ${i + 1}: invalid price "${priceRaw}".` });
+    const rate = parseFloat(rateRaw);
+    if (isNaN(rate)) {
+      errors.push({ row: i + 1, message: `Row ${i + 1}: invalid rate "${rateRaw}".` });
       continue;
     }
 
-    data.push({ country, phone_company, prefix, price });
+    data.push({ country, network, prefix, rate, rate_type: "International" });
   }
 
   return { data, errors };
+}
+
+const COL_PAIRS: [string, string[]][] = [
+  ["country", ["country"]],
+  ["phone company", ["phone company", "network"]],
+  ["prefix", ["prefix"]],
+  ["price", ["price", "rate"]],
+];
+
+function buildColMap(header: string[]): Record<string, number> {
+  const lower = header.map((h) => String(h).toLowerCase().trim().replace(/"/g, ""));
+  const colMap: Record<string, number> = {};
+  for (const [canonical, aliases] of COL_PAIRS) {
+    for (const alias of aliases) {
+      const idx = lower.findIndex(
+        (h) =>
+          h === alias ||
+          h === alias.replace(" ", "_") ||
+          h === alias.replace(" ", "")
+      );
+      if (idx >= 0) {
+        colMap[canonical] = idx;
+        break;
+      }
+    }
+  }
+  return colMap;
+}
+
+const XLSX_SHEET_NAMES = ["International", "Origin Based", "Local"] as const;
+const DATA_START_ROW = 12; // 0-indexed: row 13 in Excel has headers
+
+function parseSheetRows(
+  sheet: XLSX.WorkSheet,
+  sheetType: string,
+  errors: ParseError[]
+): PhoneRate[] {
+  const rows = XLSX.utils.sheet_to_json<string[]>(sheet, { header: 1, defval: "" }) as string[][];
+  const data: PhoneRate[] = [];
+  if (rows.length <= DATA_START_ROW) return data;
+  const headerRow = rows[DATA_START_ROW];
+  if (!headerRow?.length) return data;
+  const header = headerRow.map((c) => String(c ?? ""));
+  const colMap = buildColMap(header);
+  for (let i = DATA_START_ROW + 1; i < rows.length; i++) {
+    const row = rows[i];
+    if (!row || row.every((c) => !String(c).trim())) continue;
+    const cols = row.map((c) => String(c ?? "").trim());
+    const country = colMap["country"] >= 0 ? cols[colMap["country"]] : cols[0];
+    const network = colMap["phone company"] >= 0 ? cols[colMap["phone company"]] : cols[1];
+    const prefix = colMap["prefix"] >= 0 ? cols[colMap["prefix"]] : cols[2];
+    const rateRaw = colMap["price"] >= 0 ? cols[colMap["price"]] : cols[3];
+    if (!country || !network || !prefix || rateRaw === undefined || rateRaw === "") continue;
+    const rate = parseFloat(rateRaw);
+    if (isNaN(rate)) {
+      errors.push({ row: i + 1, message: `Sheet "${sheetType}" row ${i + 1}: invalid rate "${rateRaw}".` });
+      continue;
+    }
+    data.push({ country, network, prefix, rate, rate_type: sheetType });
+  }
+  return data;
+}
+
+function parseXLSX(buffer: ArrayBuffer): { data: PhoneRate[]; errors: ParseError[] } {
+  const errors: ParseError[] = [];
+  const data: PhoneRate[] = [];
+  try {
+    const wb = XLSX.read(buffer, { type: "array" });
+    const sheetNames = wb.SheetNames;
+    if (!sheetNames?.length) {
+      errors.push({ row: 0, message: "The file has no sheets." });
+      return { data, errors };
+    }
+    const sheetsToRead = XLSX_SHEET_NAMES.filter((name) =>
+      sheetNames.some((s) => s.trim() === name)
+    );
+    if (sheetsToRead.length > 0) {
+      for (const sheetType of sheetsToRead) {
+        const sheetName = sheetNames.find((s) => s.trim() === sheetType)!;
+        const sheet = wb.Sheets[sheetName];
+        if (!sheet) continue;
+        const sheetData = parseSheetRows(sheet, sheetType, errors);
+        data.push(...sheetData);
+      }
+    } else {
+      const firstSheet = sheetNames[0];
+      const sheet = wb.Sheets[firstSheet];
+      const sheetData = parseSheetRows(sheet, "International", errors);
+      data.push(...sheetData);
+    }
+  } catch (e) {
+    errors.push({ row: 0, message: e instanceof Error ? e.message : "Error reading XLSX." });
+  }
+  return { data, errors };
+}
+
+interface Vendor {
+  id: string;
+  nombre: string;
+  estado: string;
 }
 
 export default function CsvUploader() {
@@ -85,7 +184,26 @@ export default function CsvUploader() {
   const [parseErrors, setParseErrors] = useState<ParseError[]>([]);
   const [uploadedCount, setUploadedCount] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
+  const [vendors, setVendors] = useState<Vendor[]>([]);
+  const [selectedVendorId, setSelectedVendorId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadVendors = async () => {
+      try {
+        const { data, error } = await supabase
+          .from("vendors")
+          .select("id, nombre, estado")
+          .order("nombre");
+        if (!cancelled && !error && data) setVendors(data);
+      } catch {
+        // If it fails (e.g. table missing), leave vendors empty; dropdown will show "Unassigned"
+      }
+    };
+    loadVendors();
+    return () => { cancelled = true; };
+  }, []);
 
   const resetState = () => {
     setStatus("idle");
@@ -96,17 +214,53 @@ export default function CsvUploader() {
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
-  const doUpload = async (data: PhoneRate[]) => {
+  const doUpload = async (data: PhoneRate[], name: string) => {
     setStatus("uploading");
+
+    if (selectedVendorId) {
+      const { data: existing } = await supabase
+        .from("csv_uploads")
+        .select("id")
+        .eq("vendor_id", selectedVendorId);
+      if (existing?.length) {
+        for (const row of existing) {
+          await supabase.from("csv_uploads").delete().eq("id", row.id);
+        }
+      }
+    }
+
+    const { data: uploadRow, error: uploadError } = await supabase
+      .from("csv_uploads")
+      .insert({
+        file_name: name,
+        vendor_id: selectedVendorId || null,
+      })
+      .select("id")
+      .single();
+
+    if (uploadError || !uploadRow?.id) {
+      setParseErrors((prev) => [
+        ...prev,
+        { row: -1, message: `Save error: ${uploadError?.message ?? "Could not create upload"}` },
+      ]);
+      setStatus("error");
+      return;
+    }
+
+    const uploadId = uploadRow.id;
     const BATCH = 100;
     let total = 0;
 
     for (let i = 0; i < data.length; i += BATCH) {
-      const batch = data.slice(i, i + BATCH);
-      const { error } = await supabase.from("phone_rates").upsert(batch, {
-        onConflict: "country,phone_company,prefix",
-        ignoreDuplicates: false,
-      });
+      const batch = data.slice(i, i + BATCH).map((row) => ({
+        country: row.country,
+        network: row.network,
+        prefix: row.prefix,
+        rate: row.rate,
+        rate_type: row.rate_type ?? "International",
+        upload_id: uploadId,
+      }));
+      const { error } = await supabase.from("phone_rates").insert(batch);
       if (error) {
         setParseErrors((prev) => [
           ...prev,
@@ -123,8 +277,10 @@ export default function CsvUploader() {
   };
 
   const handleFile = async (file: File) => {
-    if (!file.name.endsWith(".csv")) {
-      setParseErrors([{ row: 0, message: "Only .csv files are accepted." }]);
+    const isCsv = file.name.toLowerCase().endsWith(".csv");
+    const isXlsx = file.name.toLowerCase().endsWith(".xlsx");
+    if (!isCsv && !isXlsx) {
+      setParseErrors([{ row: 0, message: "Only .csv or .xlsx files are accepted." }]);
       setStatus("error");
       return;
     }
@@ -132,8 +288,19 @@ export default function CsvUploader() {
     setFileName(file.name);
     setStatus("parsing");
 
-    const text = await file.text();
-    const { data, errors } = parseCSV(text);
+    let data: PhoneRate[];
+    let errors: ParseError[];
+    if (isCsv) {
+      const text = await file.text();
+      const result = parseCSV(text);
+      data = result.data;
+      errors = result.errors;
+    } else {
+      const buffer = await file.arrayBuffer();
+      const result = parseXLSX(buffer);
+      data = result.data;
+      errors = result.errors;
+    }
 
     setParseErrors(errors);
     setParsedData(data);
@@ -143,7 +310,6 @@ export default function CsvUploader() {
       return;
     }
 
-    // Show confirmation dialog
     setStatus("confirming");
   };
 
@@ -167,14 +333,17 @@ export default function CsvUploader() {
           <AlertDialogHeader>
             <AlertDialogTitle>Confirm upload</AlertDialogTitle>
             <AlertDialogDescription>
-              You are about to import <strong>{parsedData.length} records</strong> from{" "}
-              <span className="font-mono">{fileName}</span>. Existing records with the same
-              country, company and prefix will be updated. Do you want to continue?
+            You are about to import <strong>{parsedData.length} records</strong> from{" "}
+            <span className="font-mono">{fileName}</span> for the selected vendor.
+            {selectedVendorId
+              ? " Any existing CSV/XLSX for this vendor will be replaced."
+              : " They will appear in the comparison view."}{" "}
+            Do you want to continue?
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel onClick={resetState}>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={() => doUpload(parsedData)}>
+            <AlertDialogAction onClick={() => doUpload(parsedData, fileName ?? "import.csv")}>
               Yes, import
             </AlertDialogAction>
           </AlertDialogFooter>
@@ -182,6 +351,33 @@ export default function CsvUploader() {
       </AlertDialog>
 
       <div className="w-full max-w-2xl mx-auto space-y-6">
+        {/* Vendor selector */}
+        <div className="space-y-2">
+          <Label htmlFor="vendor-select">Vendor for this file</Label>
+          <Select
+            value={selectedVendorId ?? "__none__"}
+            onValueChange={(value) => setSelectedVendorId(value === "__none__" ? null : value)}
+          >
+            <SelectTrigger id="vendor-select" className="w-full max-w-xs">
+              <SelectValue placeholder="Unassigned" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__none__">Unassigned</SelectItem>
+              {vendors.map((v) => (
+                <SelectItem key={v.id} value={v.id}>
+                  {v.nombre}
+                  {v.estado === "desactivado" && (
+                    <span className="ml-2 text-xs text-muted-foreground">(disabled)</span>
+                  )}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">
+            The selected vendor will be assigned to the CSV or XLSX file you upload.
+          </p>
+        </div>
+
         {/* Drop zone */}
         <div
           className={`relative border-2 border-dashed rounded-2xl transition-all duration-200 cursor-pointer
@@ -196,7 +392,7 @@ export default function CsvUploader() {
           <input
             ref={fileInputRef}
             type="file"
-            accept=".csv"
+            accept=".csv,.xlsx"
             className="hidden"
             onChange={onFileChange}
           />
@@ -209,14 +405,14 @@ export default function CsvUploader() {
                 </div>
                 <div>
                   <p className="text-lg font-semibold text-foreground">
-                    Drag your CSV file here
+                    Drag a CSV or XLSX file here
                   </p>
                   <p className="text-sm text-muted-foreground mt-1">
-                    or click to select it
+                    or click to select
                   </p>
                 </div>
                 <div className="flex gap-2 flex-wrap justify-center text-xs text-muted-foreground">
-                  {["country", "phone company", "prefix", "price"].map((col) => (
+                  {["country", "network", "prefix", "rate"].map((col) => (
                     <span key={col} className="bg-muted px-2 py-1 rounded-full font-mono">
                       {col}
                     </span>
@@ -334,15 +530,15 @@ export default function CsvUploader() {
                   className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-destructive transition-colors"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
-                  Upload another
+                  Upload another file
                 </button>
               )}
             </div>
             <div className="overflow-x-auto max-h-60">
               <table className="w-full text-sm">
                 <thead>
-                  <tr className="border-b border-border bg-card">
-                    {["Country", "Company", "Prefix", "Price"].map((h) => (
+                    <tr className="border-b border-border bg-card">
+                    {["Country", "Network", "Prefix", "Rate"].map((h) => (
                       <th key={h} className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide">
                         {h}
                       </th>
@@ -353,9 +549,9 @@ export default function CsvUploader() {
                   {parsedData.slice(0, 50).map((row, i) => (
                     <tr key={i} className="border-b border-border last:border-0 hover:bg-muted/40 transition-colors">
                       <td className="px-4 py-2.5 text-foreground">{row.country}</td>
-                      <td className="px-4 py-2.5 text-foreground">{row.phone_company}</td>
+                      <td className="px-4 py-2.5 text-foreground">{row.network}</td>
                       <td className="px-4 py-2.5 font-mono text-primary">{row.prefix}</td>
-                      <td className="px-4 py-2.5 text-foreground">{row.price.toFixed(4)}</td>
+                      <td className="px-4 py-2.5 text-foreground">{row.rate.toFixed(4)}</td>
                     </tr>
                   ))}
                   {parsedData.length > 50 && (

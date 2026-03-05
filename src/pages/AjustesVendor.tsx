@@ -1,0 +1,372 @@
+import { useMemo, useState, useEffect } from "react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { supabase } from "@/integrations/supabase/client";
+import { RefreshCw } from "lucide-react";
+
+type VendorStatus = "activado" | "desactivado";
+
+type Vendor = {
+  id: string;
+  nombre: string;
+  descripcion?: string | null;
+  estado: VendorStatus;
+};
+
+const AjustesVendor = () => {
+  const [vendors, setVendors] = useState<Vendor[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [selectedVendor, setSelectedVendor] = useState<Vendor | null>(null);
+  const [mode, setMode] = useState<"crear" | "editar" | "ver">("crear");
+  const [isDialogOpen, setIsDialogOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const [formNombre, setFormNombre] = useState("");
+  const [formDescripcion, setFormDescripcion] = useState("");
+  const [formEstado, setFormEstado] = useState<VendorStatus>("activado");
+
+  const fetchVendors = async () => {
+    setLoading(true);
+    const { data, error } = await supabase
+      .from("vendors")
+      .select("id, nombre, descripcion, estado")
+      .order("nombre");
+    if (!error && data) setVendors(data);
+    setLoading(false);
+  };
+
+  useEffect(() => {
+    fetchVendors();
+  }, []);
+
+  const isReadOnly = mode === "ver";
+  const dialogTitle = useMemo(() => {
+    if (mode === "crear") return "Create vendor";
+    if (mode === "editar") return "Edit vendor";
+    return "Vendor details";
+  }, [mode]);
+
+  const resetForm = () => {
+    setFormNombre("");
+    setFormDescripcion("");
+    setFormEstado("activado");
+    setSelectedVendor(null);
+    setMode("crear");
+  };
+
+  const openCreateDialog = () => {
+    resetForm();
+    setMode("crear");
+    setIsDialogOpen(true);
+  };
+
+  const openViewDialog = (vendor: Vendor) => {
+    setSelectedVendor(vendor);
+    setFormNombre(vendor.nombre);
+    setFormDescripcion(vendor.descripcion ?? "");
+    setFormEstado(vendor.estado);
+    setMode("ver");
+    setIsDialogOpen(true);
+  };
+
+  const openEditDialog = (vendor: Vendor) => {
+    setSelectedVendor(vendor);
+    setFormNombre(vendor.nombre);
+    setFormDescripcion(vendor.descripcion ?? "");
+    setFormEstado(vendor.estado);
+    setMode("editar");
+    setIsDialogOpen(true);
+  };
+
+  const handleDelete = async (vendor: Vendor) => {
+    const confirmDelete = window.confirm(
+      `Are you sure you want to delete the vendor "${vendor.nombre}"?`,
+    );
+    if (!confirmDelete) return;
+
+    const { error } = await supabase.from("vendors").delete().eq("id", vendor.id);
+    if (error) {
+      alert(`Error deleting: ${error.message}`);
+      return;
+    }
+    setVendors((prev) => prev.filter((v) => v.id !== vendor.id));
+    if (selectedVendor?.id === vendor.id) {
+      resetForm();
+      setIsDialogOpen(false);
+    }
+  };
+
+  const handleSubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
+
+    if (!formNombre.trim()) {
+      alert("Name is required.");
+      return;
+    }
+
+    setSaving(true);
+    if (mode === "crear") {
+      const { data, error } = await supabase
+        .from("vendors")
+        .insert({
+          nombre: formNombre.trim(),
+          descripcion: formDescripcion.trim() || null,
+          estado: formEstado,
+        })
+        .select("id, nombre, descripcion, estado")
+        .single();
+      if (error) {
+        alert(`Error creating: ${error.message}`);
+        setSaving(false);
+        return;
+      }
+      if (data) setVendors((prev) => [data, ...prev]);
+    } else if (mode === "editar" && selectedVendor) {
+      const { error } = await supabase
+        .from("vendors")
+        .update({
+          nombre: formNombre.trim(),
+          descripcion: formDescripcion.trim() || null,
+          estado: formEstado,
+        })
+        .eq("id", selectedVendor.id);
+      if (error) {
+        alert(`Error saving: ${error.message}`);
+        setSaving(false);
+        return;
+      }
+      setVendors((prev) =>
+        prev.map((v) =>
+          v.id === selectedVendor.id
+            ? {
+                ...v,
+                nombre: formNombre.trim(),
+                descripcion: formDescripcion.trim() || null,
+                estado: formEstado,
+              }
+            : v,
+        ),
+      );
+    }
+    setSaving(false);
+    setIsDialogOpen(false);
+    resetForm();
+  };
+
+  return (
+    <div className="rounded-2xl border border-border bg-card p-8 space-y-6">
+      <div className="flex items-start justify-between gap-4">
+        <div className="space-y-1">
+          <h1 className="text-2xl font-bold text-foreground">
+            Settings · Vendors
+          </h1>
+          <p className="text-sm text-muted-foreground max-w-xl">
+            Manage vendors that provide phone rates. You can create, edit, view
+            details, or delete records. Description is optional and status can be
+            enabled or disabled.
+          </p>
+        </div>
+        <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
+          <DialogTrigger asChild>
+            <Button size="sm" onClick={openCreateDialog}>
+              Create vendor
+            </Button>
+          </DialogTrigger>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>{dialogTitle}</DialogTitle>
+            </DialogHeader>
+            <form className="space-y-4" onSubmit={handleSubmit}>
+              <div className="space-y-2">
+                  <Label htmlFor="nombre">
+                      Name <span className="text-destructive">*</span>
+                    </Label>
+                <Input
+                  id="nombre"
+                  value={formNombre}
+                  onChange={(event) => setFormNombre(event.target.value)}
+                  placeholder="Ej. Telco MX"
+                  required
+                  readOnly={isReadOnly}
+                />
+              </div>
+              <div className="space-y-2">
+                  <Label htmlFor="descripcion">
+                      Description{" "}
+                      <span className="text-muted-foreground text-xs">
+                        (optional)
+                      </span>
+                    </Label>
+                <Textarea
+                  id="descripcion"
+                  value={formDescripcion}
+                  onChange={(event) => setFormDescripcion(event.target.value)}
+                  placeholder="Additional information about the vendor"
+                  rows={3}
+                  readOnly={isReadOnly}
+                />
+              </div>
+              <div className="space-y-2">
+                  <Label htmlFor="estado">Status</Label>
+                <select
+                  id="estado"
+                  className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                  value={formEstado}
+                  onChange={(event) =>
+                    setFormEstado(event.target.value as VendorStatus)
+                  }
+                  disabled={isReadOnly}
+                >
+                    <option value="activado">Enabled</option>
+                    <option value="desactivado">Disabled</option>
+                </select>
+              </div>
+              <DialogFooter>
+                {isReadOnly ? (
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    onClick={() => setIsDialogOpen(false)}
+                  >
+                    Close
+                  </Button>
+                ) : (
+                  <>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          onClick={() => setIsDialogOpen(false)}
+                        >
+                          Cancel
+                        </Button>
+                        <Button type="submit" disabled={saving}>
+                      {saving ? "Saving…" : mode === "crear" ? "Create" : "Save changes"}
+                    </Button>
+                  </>
+                )}
+              </DialogFooter>
+            </form>
+          </DialogContent>
+        </Dialog>
+      </div>
+
+      <div className="rounded-xl border border-border bg-background/40">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Name</TableHead>
+              <TableHead>Description</TableHead>
+              <TableHead className="w-32">Status</TableHead>
+              <TableHead className="w-40 text-right">Actions</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {loading ? (
+              <TableRow>
+                <TableCell
+                  colSpan={4}
+                  className="text-center py-12 text-sm text-muted-foreground"
+                >
+                  <RefreshCw className="w-4 h-4 animate-spin inline-block mr-2" />
+                  Loading vendors…
+                </TableCell>
+              </TableRow>
+            ) : vendors.length === 0 ? (
+              <TableRow>
+                <TableCell
+                  colSpan={4}
+                  className="text-center text-sm text-muted-foreground py-8"
+                >
+                  No vendors yet. Create the first one with the
+                  &quot;Create vendor&quot; button.
+                </TableCell>
+              </TableRow>
+            ) : (
+              vendors.map((vendor) => (
+                <TableRow key={vendor.id}>
+                  <TableCell className="font-medium">
+                    {vendor.nombre}
+                  </TableCell>
+                  <TableCell className="text-muted-foreground">
+                    {vendor.descripcion ?? (
+                      <span className="italic text-xs text-muted-foreground">
+                        No description
+                      </span>
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    <Badge
+                      variant={
+                        vendor.estado === "activado" ? "default" : "outline"
+                      }
+                      className={
+                        vendor.estado === "activado"
+                          ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-300 border-emerald-500/30"
+                          : ""
+                      }
+                    >
+                      {vendor.estado === "activado"
+                        ? "Enabled"
+                        : "Disabled"}
+                    </Badge>
+                  </TableCell>
+                  <TableCell className="text-right space-x-2">
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="h-8 w-8"
+                      onClick={() => openViewDialog(vendor)}
+                      aria-label={`View vendor ${vendor.nombre}`}
+                    >
+                      👁
+                    </Button>
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="h-8 w-8"
+                      onClick={() => openEditDialog(vendor)}
+                      aria-label={`Edit vendor ${vendor.nombre}`}
+                    >
+                      ✏️
+                    </Button>
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="h-8 w-8 text-destructive hover:text-destructive"
+                      onClick={() => handleDelete(vendor)}
+                      aria-label={`Delete vendor ${vendor.nombre}`}
+                    >
+                      🗑
+                    </Button>
+                  </TableCell>
+                </TableRow>
+              ))
+            )}
+          </TableBody>
+        </Table>
+      </div>
+    </div>
+  );
+};
+
+export default AjustesVendor;
+
