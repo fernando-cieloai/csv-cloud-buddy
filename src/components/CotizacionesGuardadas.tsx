@@ -43,6 +43,7 @@ interface SavedQuotation {
     rows: {
       country: string;
       type?: string;
+      lineType?: string;
       byVendor: Record<
         string,
         | { prefixes: string[]; rate: number; ratePlusExtra: number | null }
@@ -118,17 +119,20 @@ export default function CotizacionesGuardadas() {
     if (!vendors?.length || !rows?.length) return;
     const useNewFormat = isNewSnapshotFormat(q.snapshot);
     const types = useNewFormat ? (rateTypes ?? RATE_TYPES) : ["rate"];
+    const hasLineType = rows.some((r) => r.lineType != null);
 
-    const headerRow = useNewFormat ? ["Country"] : ["Country", "Type"];
+    const headerRow = useNewFormat && hasLineType ? ["Country", "Type"] : useNewFormat ? ["Country"] : ["Country", "Type"];
     for (const v of vendors) {
       headerRow.push(`${v.nombre} - prefix`);
       for (const t of types) headerRow.push(`${v.nombre} - ${t} rate`);
     }
     const dataRows = rows.map((row) => {
-      const r: (string | number)[] = useNewFormat ? [row.country] : [row.country, row.type ?? ""];
+      const typeCol = hasLineType ? (row.lineType ?? row.type ?? "") : (row.type ?? "");
+      const r: (string | number)[] = useNewFormat && hasLineType ? [row.country, typeCol] : useNewFormat ? [row.country] : [row.country, typeCol];
       for (const v of vendors) {
         const cell = row.byVendor?.[v.id];
-        if (useNewFormat && cell && "International" in cell) {
+        const hasMultiType = cell && ((cell as CellByType)["International"] !== undefined || (cell as CellByType)["mobile"] !== undefined);
+        if (useNewFormat && hasMultiType) {
           const byType = cell as CellByType;
           const allPrefixes = types.flatMap((t) => (byType[t]?.prefixes ?? []));
           r.push(truncateForExcel([...new Set(allPrefixes)].join(", ")));
@@ -284,7 +288,7 @@ export default function CotizacionesGuardadas() {
                 <thead className="sticky top-0 z-10 bg-muted">
                   <tr className="border-b border-border">
                     <th className="text-left px-4 py-2 text-xs font-semibold">Country</th>
-                    {!isNewSnapshotFormat(viewingQuotation.snapshot) && (
+                    {(!isNewSnapshotFormat(viewingQuotation.snapshot) || viewingQuotation.snapshot.rows.some((r) => r.lineType != null)) && (
                       <th className="text-left px-4 py-2 text-xs font-semibold">Type</th>
                     )}
                     {viewingQuotation.snapshot.vendors.map((v) => {
@@ -300,7 +304,7 @@ export default function CotizacionesGuardadas() {
                   </tr>
                   <tr className="border-b border-border">
                     <th className="text-left px-4 py-1 text-[10px] font-normal text-muted-foreground"> </th>
-                    {!isNewSnapshotFormat(viewingQuotation.snapshot) && (
+                    {(!isNewSnapshotFormat(viewingQuotation.snapshot) || viewingQuotation.snapshot.rows.some((r) => r.lineType != null)) && (
                       <th className="text-left px-4 py-1 text-[10px] font-normal text-muted-foreground"> </th>
                     )}
                     {viewingQuotation.snapshot.vendors.flatMap((v) => {
@@ -336,12 +340,12 @@ export default function CotizacionesGuardadas() {
                   {viewingQuotation.snapshot.rows.map((row, idx) => (
                     <tr key={idx} className="border-b border-border hover:bg-muted/20">
                       <td className="px-4 py-2 font-medium">{row.country}</td>
-                      {!isNewSnapshotFormat(viewingQuotation.snapshot) && (
-                        <td className="px-4 py-2">{row.type ?? "—"}</td>
+                      {(!isNewSnapshotFormat(viewingQuotation.snapshot) || viewingQuotation.snapshot.rows.some((r) => r.lineType != null)) && (
+                        <td className="px-4 py-2">{row.lineType ?? row.type ?? "—"}</td>
                       )}
                       {viewingQuotation.snapshot.vendors.map((v) => {
                         const cell = row.byVendor[v.id];
-                        const useNew = isNewSnapshotFormat(viewingQuotation.snapshot) && cell && "International" in cell;
+                        const useNew = isNewSnapshotFormat(viewingQuotation.snapshot) && cell && ((cell as CellByType)["International"] !== undefined || (cell as CellByType)["mobile"] !== undefined);
                         if (useNew && cell) {
                           const byType = cell as CellByType;
                           const types = viewingQuotation.snapshot.rateTypes ?? RATE_TYPES;

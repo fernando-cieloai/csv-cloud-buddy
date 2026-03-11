@@ -22,10 +22,10 @@ const App = () => (
         <Routes>
           <Route element={<MainLayout />}>
             <Route path="/" element={<Index />} />
-            <Route path="/cotizaciones" element={<Cotizaciones />} />
-            <Route path="/ajustes/vendor" element={<AjustesVendor />} />
-            <Route path="/ajustes/csv" element={<AjustesCsv />} />
-            <Route path="/ajustes/paises" element={<AjustesPaises />} />
+            <Route path="/quotations" element={<Cotizaciones />} />
+            <Route path="/settings/vendor" element={<AjustesVendor />} />
+            <Route path="/settings/csv" element={<AjustesCsv />} />
+            <Route path="/settings/countries" element={<AjustesPaises />} />
           </Route>
           {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
           <Route path="*" element={<NotFound />} />

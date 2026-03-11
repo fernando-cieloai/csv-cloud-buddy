@@ -13,7 +13,7 @@ export const Navbar = () => {
   return (
     <nav className="flex items-center gap-6 text-sm">
       <NavLink
-        to="/cotizaciones"
+        to="/quotations"
         className={({ isActive }) =>
           [
             baseLinkClasses,
@@ -32,7 +32,7 @@ export const Navbar = () => {
         </span>
         <div className="flex items-center gap-2">
           <NavLink
-            to="/ajustes/vendor"
+            to="/settings/vendor"
             className={({ isActive }) =>
               [
                 baseLinkClasses,
@@ -45,7 +45,7 @@ export const Navbar = () => {
             Create vendor
           </NavLink>
           <NavLink
-            to="/ajustes/csv"
+            to="/settings/csv"
             className={({ isActive }) =>
               [
                 baseLinkClasses,
@@ -58,7 +58,7 @@ export const Navbar = () => {
             Upload CSV
           </NavLink>
           <NavLink
-            to="/ajustes/paises"
+            to="/settings/countries"
             className={({ isActive }) =>
               [
                 baseLinkClasses,

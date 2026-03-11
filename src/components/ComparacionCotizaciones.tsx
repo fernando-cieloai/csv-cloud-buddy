@@ -43,6 +43,7 @@ interface RateRow {
 interface AggregatedRateRow {
   upload_id: string;
   country: string;
+  line_type: string;
   rate_type: string;
   prefixes: string[];
   rate: number;
@@ -51,6 +52,9 @@ interface AggregatedRateRow {
 const RATE_TYPES = ["International", "Origin Based", "Local"] as const;
 type RateType = (typeof RATE_TYPES)[number];
 
+const LINE_TYPES = ["mobile", "landline", "others"] as const;
+type LineType = (typeof LINE_TYPES)[number];
+
 function getRateType(rate_type: string | null): RateType {
   if (!rate_type) return "International";
   const normalized = rate_type.trim();
@@ -58,8 +62,11 @@ function getRateType(rate_type: string | null): RateType {
   return "International";
 }
 
-function typeRowKey(country: string, type: RateType): string {
-  return `${country}\t${type}`;
+function getLineType(line_type: string | null): LineType {
+  if (!line_type) return "others";
+  const normalized = line_type.trim().toLowerCase();
+  if (LINE_TYPES.includes(normalized as LineType)) return normalized as LineType;
+  return "others";
 }
 
 export interface ComparacionCotizacionesProps {
@@ -379,27 +386,29 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
       countryFilter.size === 0 ? true : countryFilterLower.has(country?.trim().toLowerCase());
     const keyToRow = new Map<
       string,
-      { country: string; byVendor: Map<string, Partial<Record<RateType, VendorCellByType>>> }
+      { country: string; lineType: LineType; byVendor: Map<string, Partial<Record<RateType, VendorCellByType>>> }
     >();
     for (const row of r) {
       if (!countryMatches(row.country)) continue;
       const u = uploadById.get(row.upload_id);
       if (!u?.vendor_id || !vendorList.some((v) => v.id === u.vendor_id)) continue;
-      const type = getRateType(row.rate_type ?? null);
-      if (!keyToRow.has(row.country))
-        keyToRow.set(row.country, { country: row.country, byVendor: new Map() });
-      const tr = keyToRow.get(row.country)!;
+      const rateType = getRateType(row.rate_type ?? null);
+      const lineType = getLineType(row.line_type ?? null);
+      const rowKey = `${row.country}\t${lineType}`;
+      if (!keyToRow.has(rowKey))
+        keyToRow.set(rowKey, { country: row.country, lineType, byVendor: new Map() });
+      const tr = keyToRow.get(rowKey)!;
       if (!tr.byVendor.has(u.vendor_id)) tr.byVendor.set(u.vendor_id, {});
       const byType = tr.byVendor.get(u.vendor_id)!;
-      if (!byType[type]) byType[type] = { prefixes: [], rate: 0 };
-      const cell = byType[type]!;
+      if (!byType[rateType]) byType[rateType] = { prefixes: [], rate: 0 };
+      const cell = byType[rateType]!;
       cell.prefixes = [...new Set([...cell.prefixes, ...(row.prefixes ?? [])])];
       if (row.rate > cell.rate) cell.rate = row.rate;
     }
     let list = Array.from(keyToRow.values()).filter((row) => row.byVendor.size > 0);
     if (searchQ)
       list = list.filter((x) => x.country.toLowerCase().includes(searchQ));
-    list.sort((a, b) => a.country.localeCompare(b.country));
+    list.sort((a, b) => a.country.localeCompare(b.country) || LINE_TYPES.indexOf(a.lineType) - LINE_TYPES.indexOf(b.lineType));
     return list;
   };
 
@@ -443,7 +452,7 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
         toast.error("No data to export");
         return;
       }
-      const headerRow = ["Country"];
+      const headerRow = ["Country", "Type"];
       for (const v of selectedVendorsList) {
         headerRow.push(`${v.nombre} - prefix`);
         for (const t of RATE_TYPES) headerRow.push(`${v.nombre} - ${t} rate`);
@@ -453,7 +462,7 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
         s.length > EXCEL_CELL_MAX ? s.slice(0, EXCEL_CELL_MAX - 20) + "… (truncated)" : s;
 
       const dataRows = rowsToExport.map((row) => {
-        const r: (string | number)[] = [row.country];
+        const r: (string | number)[] = [row.country, row.lineType];
         for (const v of selectedVendorsList) {
           const byType = row.byVendor.get(v.id);
           const allPrefixes = RATE_TYPES.flatMap((t) => byType?.[t]?.prefixes ?? []);
@@ -496,8 +505,10 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
       const snapshot = {
         vendors: selectedVendorsList.map((v) => ({ id: v.id, nombre: v.nombre })),
         rateTypes: [...RATE_TYPES],
+        lineTypes: [...LINE_TYPES],
         rows: rowsToSave.map((row) => ({
           country: row.country,
+          lineType: row.lineType,
           byVendor: Object.fromEntries(
             Array.from(row.byVendor.entries()).map(([vendorId, byType]) => {
               const cells: Record<string, { prefixes: string[]; rate: number; ratePlusExtra: number | null }> = {};
@@ -954,9 +965,15 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
                 <tr className="border-b border-border">
                   <th
                     rowSpan={2}
-                    className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide bg-muted border-r-2 border-border w-[6rem] min-w-[6rem] align-bottom"
+                    className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide bg-muted border-r border-border w-[6rem] min-w-[6rem] align-bottom"
                   >
                     Country
+                  </th>
+                  <th
+                    rowSpan={2}
+                    className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide bg-muted border-r-2 border-border w-[5rem] min-w-[5rem] align-bottom"
+                  >
+                    Type
                   </th>
                   {selectedVendorsList.map((v) => (
                     <th
@@ -993,19 +1010,32 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
                 {tableRows.length === 0 ? (
                   <tr>
                     <td
-                      colSpan={1 + selectedVendorsList.length * (1 + RATE_TYPES.length)}
+                      colSpan={2 + selectedVendorsList.length * (1 + RATE_TYPES.length)}
                       className="px-4 py-8 text-center text-muted-foreground"
                     >
                       {search ? "No records match the filter." : "No records for selection."}
                     </td>
                   </tr>
                 ) : (
-                  tableRows.map((row, idx) => (
+                  tableRows.map((row, idx) => {
+                    const countryStart = idx === 0 || tableRows[idx - 1].country !== row.country;
+                    const countrySpan = countryStart
+                      ? tableRows.filter((r) => r.country === row.country).length
+                      : 0;
+                    return (
                       <tr key={idx} className="border-b border-border hover:bg-muted/20">
+                        {countryStart ? (
+                          <td
+                            rowSpan={countrySpan}
+                            className="px-4 py-2.5 text-foreground align-middle bg-muted/30 border-r border-border font-medium"
+                          >
+                            {row.country}
+                          </td>
+                        ) : null}
                         <td
-                          className="px-4 py-2.5 text-foreground align-top bg-muted/30 border-r-2 border-border font-medium"
+                          className="px-4 py-2.5 text-muted-foreground align-top bg-muted/20 border-r-2 border-border text-xs font-medium"
                         >
-                          {row.country}
+                          {row.lineType}
                         </td>
                         {selectedVendorsList.map((v) => {
                           const byType = row.byVendor.get(v.id);
@@ -1077,7 +1107,8 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
                           );
                         })}
                       </tr>
-                    ))
+                    );
+                  })
                 )}
               </tbody>
             </table>
