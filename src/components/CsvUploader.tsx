@@ -353,26 +353,28 @@ export default function CsvUploader() {
       <div className="w-full max-w-2xl mx-auto space-y-6">
         {/* Vendor selector */}
         <div className="space-y-2">
-          <Label htmlFor="vendor-select">Vendor for this file</Label>
-          <Select
-            value={selectedVendorId ?? "__none__"}
-            onValueChange={(value) => setSelectedVendorId(value === "__none__" ? null : value)}
-          >
-            <SelectTrigger id="vendor-select" className="w-full max-w-xs">
-              <SelectValue placeholder="Unassigned" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="__none__">Unassigned</SelectItem>
-              {vendors.map((v) => (
-                <SelectItem key={v.id} value={v.id}>
-                  {v.nombre}
-                  {v.estado === "desactivado" && (
-                    <span className="ml-2 text-xs text-muted-foreground">(disabled)</span>
-                  )}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <div className="flex items-center gap-3">
+            <Label htmlFor="vendor-select" className="shrink-0">Vendor for this file</Label>
+            <Select
+              value={selectedVendorId ?? "__none__"}
+              onValueChange={(value) => setSelectedVendorId(value === "__none__" ? null : value)}
+            >
+              <SelectTrigger id="vendor-select" className="w-[200px]">
+                <SelectValue placeholder="Unassigned" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__none__">Unassigned</SelectItem>
+                {vendors.map((v) => (
+                  <SelectItem key={v.id} value={v.id}>
+                    {v.nombre}
+                    {v.estado === "desactivado" && (
+                      <span className="ml-2 text-xs text-muted-foreground">(disabled)</span>
+                    )}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
           <p className="text-xs text-muted-foreground">
             The selected vendor will be assigned to the CSV or XLSX file you upload.
           </p>

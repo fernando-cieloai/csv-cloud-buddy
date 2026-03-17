@@ -37,6 +37,27 @@ export type Database = {
           { foreignKeyName: "countries_region_id_fkey"; columns: ["region_id"]; referencedRelation: "regions"; referencedColumns: ["id"] }
         ]
       }
+      clients: {
+        Row: {
+          id: string
+          name: string
+          description: string | null
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          name: string
+          description?: string | null
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          name?: string
+          description?: string | null
+          created_at?: string
+        }
+        Relationships: []
+      }
       csv_uploads: {
         Row: {
           id: string
@@ -91,6 +112,8 @@ export type Database = {
           vendor_ids: string[]
           snapshot: Json
           created_at: string
+          client_id: string | null
+          status: string
         }
         Insert: {
           id?: string
@@ -98,6 +121,8 @@ export type Database = {
           vendor_ids?: string[]
           snapshot: Json
           created_at?: string
+          client_id?: string | null
+          status?: string
         }
         Update: {
           id?: string
@@ -105,8 +130,12 @@ export type Database = {
           vendor_ids?: string[]
           snapshot?: Json
           created_at?: string
+          client_id?: string | null
+          status?: string
         }
-        Relationships: []
+        Relationships: [
+          { foreignKeyName: "saved_quotations_client_id_fkey"; columns: ["client_id"]; referencedRelation: "clients"; referencedColumns: ["id"] }
+        ]
       }
       regions: {
         Row: {

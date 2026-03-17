@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useMemo } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
-import { RefreshCw, Eye, FileDown } from "lucide-react";
+import { RefreshCw, Eye, FileDown, Plus, Search, Pencil, Archive, ArchiveRestore } from "lucide-react";
 import * as XLSX from "xlsx";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -16,9 +17,12 @@ import {
 import {
   Dialog,
   DialogContent,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
@@ -26,8 +30,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { DateRangePicker } from "@/components/ui/date-range-picker";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 
 const RATE_TYPES = ["International", "Origin Based", "Local"];
 
@@ -37,9 +41,12 @@ interface SavedQuotation {
   id: string;
   name: string | null;
   vendor_ids: string[];
+  client_id: string | null;
+  status: string;
   snapshot: {
     vendors: { id: string; nombre: string }[];
     rateTypes?: string[];
+    extra?: { countries: string[]; value: number };
     rows: {
       country: string;
       type?: string;
@@ -59,26 +66,39 @@ interface Vendor {
   nombre: string;
 }
 
+interface Client {
+  id: string;
+  name: string;
+}
+
 export default function CotizacionesGuardadas() {
+  const navigate = useNavigate();
   const [quotations, setQuotations] = useState<SavedQuotation[]>([]);
   const [vendors, setVendors] = useState<Vendor[]>([]);
+  const [clients, setClients] = useState<Client[]>([]);
   const [loading, setLoading] = useState(true);
-  const [filterVendorId, setFilterVendorId] = useState<string>("all");
+  const [nameSearch, setNameSearch] = useState("");
+  const [filterClientId, setFilterClientId] = useState<string>("__all__");
+  const [filterStatus, setFilterStatus] = useState<string>("all");
   const [filterDateFrom, setFilterDateFrom] = useState("");
   const [filterDateTo, setFilterDateTo] = useState("");
   const [viewingQuotation, setViewingQuotation] = useState<SavedQuotation | null>(null);
+  const [page, setPage] = useState(1);
+  const [pageSize] = useState(10);
 
   const fetchData = async () => {
     setLoading(true);
-    const [quotationsRes, vendorsRes] = await Promise.all([
+    const [quotationsRes, vendorsRes, clientsRes] = await Promise.all([
       supabase
         .from("saved_quotations")
-        .select("id, name, vendor_ids, snapshot, created_at")
+        .select("id, name, vendor_ids, client_id, status, snapshot, created_at")
         .order("created_at", { ascending: false }),
       supabase.from("vendors").select("id, nombre").order("nombre"),
+      supabase.from("clients").select("id, name").order("name"),
     ]);
     if (!quotationsRes.error && quotationsRes.data) setQuotations(quotationsRes.data as SavedQuotation[]);
     if (!vendorsRes.error && vendorsRes.data) setVendors(vendorsRes.data);
+    if (!clientsRes.error && clientsRes.data) setClients(clientsRes.data as Client[]);
     setLoading(false);
   };
 
@@ -87,20 +107,60 @@ export default function CotizacionesGuardadas() {
   }, []);
 
   const filteredQuotations = useMemo(() => {
-    return quotations.filter((q) => {
-      if (filterVendorId !== "all" && !(q.vendor_ids ?? []).includes(filterVendorId)) return false;
+    const searchLower = nameSearch.toLowerCase().trim();
+    const filtered = quotations.filter((q) => {
+      if (searchLower && !(q.name ?? "").toLowerCase().includes(searchLower)) return false;
+      if (filterClientId !== "__all__" && q.client_id !== filterClientId) return false;
+      if (filterStatus !== "all") {
+        const s = q.status ?? "active";
+        if (filterStatus === "active" && s !== "active") return false;
+        if (filterStatus === "archived" && s !== "archived") return false;
+      }
       const createdAt = new Date(q.created_at);
       if (filterDateFrom && createdAt < new Date(filterDateFrom + "T00:00:00")) return false;
       if (filterDateTo && createdAt > new Date(filterDateTo + "T23:59:59")) return false;
       return true;
     });
-  }, [quotations, filterVendorId, filterDateFrom, filterDateTo]);
+    return [...filtered].sort((a, b) => {
+      const aArchived = (a.status ?? "active") === "archived";
+      const bArchived = (b.status ?? "active") === "archived";
+      if (aArchived !== bArchived) return aArchived ? 1 : -1;
+      return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+    });
+  }, [quotations, nameSearch, filterClientId, filterStatus, filterDateFrom, filterDateTo]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredQuotations.length / pageSize));
+  const paginatedQuotations = useMemo(
+    () => filteredQuotations.slice((page - 1) * pageSize, page * pageSize),
+    [filteredQuotations, page, pageSize]
+  );
+
+  useEffect(() => {
+    setPage(1);
+  }, [nameSearch, filterClientId, filterStatus, filterDateFrom, filterDateTo]);
 
   const vendorById = useMemo(() => {
     const m = new Map<string, Vendor>();
     for (const v of vendors) m.set(v.id, v);
     return m;
   }, [vendors]);
+
+  const clientById = useMemo(() => {
+    const m = new Map<string, Client>();
+    for (const c of clients) m.set(c.id, c);
+    return m;
+  }, [clients]);
+
+  const handleArchive = async (q: SavedQuotation) => {
+    const newStatus = (q.status ?? "active") === "archived" ? "active" : "archived";
+    const { error } = await supabase.from("saved_quotations").update({ status: newStatus }).eq("id", q.id);
+    if (error) {
+      toast.error(error.message);
+      return;
+    }
+    setQuotations((prev) => prev.map((x) => (x.id === q.id ? { ...x, status: newStatus } : x)));
+    toast.success(newStatus === "archived" ? "Archived" : "Restored");
+  };
 
   const formatDate = (iso: string) => {
     const d = new Date(iso);
@@ -160,80 +220,94 @@ export default function CotizacionesGuardadas() {
 
   return (
     <div className="space-y-6">
-      <div className="rounded-2xl border border-border bg-card p-6 space-y-6">
-        <h3 className="text-sm font-semibold text-foreground">Saved quotations</h3>
-
-        <div className="flex flex-wrap gap-4 items-end">
-          <div className="space-y-2">
-            <Label className="text-xs">Vendor</Label>
-            <Select value={filterVendorId} onValueChange={setFilterVendorId}>
-              <SelectTrigger className="w-[180px]">
-                <SelectValue placeholder="All vendors" />
+      <div className="rounded-2xl border border-border bg-card p-8 space-y-6">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-2 sm:gap-3 min-w-0 flex-1">
+            <div className="relative flex-1 min-w-[140px] max-w-[220px]">
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+              <Input
+                type="text"
+                placeholder="Search by name…"
+                value={nameSearch}
+                onChange={(e) => setNameSearch(e.target.value)}
+                className="pl-8 h-9"
+              />
+            </div>
+            <Select value={filterClientId} onValueChange={setFilterClientId}>
+              <SelectTrigger className="h-9 w-[140px] sm:w-[160px]">
+                <SelectValue placeholder="Client" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="all">All vendors</SelectItem>
-                {vendors.map((v) => (
-                  <SelectItem key={v.id} value={v.id}>
-                    {v.nombre}
+                <SelectItem value="__all__">All clients</SelectItem>
+                {clients.map((c) => (
+                  <SelectItem key={c.id} value={c.id}>
+                    {c.name}
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
-          </div>
-          <div className="space-y-2">
-            <Label className="text-xs">From date</Label>
-            <Input
-              type="date"
-              value={filterDateFrom}
-              onChange={(e) => setFilterDateFrom(e.target.value)}
-              className="w-[140px]"
+            <Select value={filterStatus} onValueChange={setFilterStatus}>
+              <SelectTrigger className="h-9 w-[100px] sm:w-[110px]">
+                <SelectValue placeholder="Status" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All</SelectItem>
+                <SelectItem value="active">Active</SelectItem>
+                <SelectItem value="archived">Archived</SelectItem>
+              </SelectContent>
+            </Select>
+            <DateRangePicker
+              from={filterDateFrom}
+              to={filterDateTo}
+              onRangeChange={(from, to) => {
+                setFilterDateFrom(from ?? "");
+                setFilterDateTo(to ?? "");
+              }}
+              className="h-9 min-w-[220px]"
             />
           </div>
-          <div className="space-y-2">
-            <Label className="text-xs">To date</Label>
-            <Input
-              type="date"
-              value={filterDateTo}
-              onChange={(e) => setFilterDateTo(e.target.value)}
-              className="w-[140px]"
-            />
-          </div>
-          <Button variant="ghost" size="sm" onClick={fetchData}>
-            <RefreshCw className="w-3.5 h-3.5 mr-1.5" />
-            Refresh
+          <Button asChild variant="outline" size="sm" className="h-9 shrink-0">
+            <Link to="/quotations/create" className="inline-flex items-center gap-2">
+              <Plus className="w-3.5 h-3.5" />
+              Create
+            </Link>
           </Button>
         </div>
-      </div>
 
-      <div className="rounded-2xl border border-border bg-card overflow-hidden">
-        <Table>
+        <div className="rounded-xl border border-border bg-background/40 mx-4 mt-4 mb-4">
+          <Table>
           <TableHeader>
             <TableRow>
               <TableHead>Name</TableHead>
+              <TableHead>Client</TableHead>
               <TableHead>Vendors</TableHead>
+              <TableHead>Status</TableHead>
               <TableHead>Created</TableHead>
-              <TableHead className="w-24 text-right">Actions</TableHead>
+              <TableHead className="w-32 text-right">Actions</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {loading ? (
               <TableRow>
-                <TableCell colSpan={4} className="text-center py-12 text-muted-foreground">
+                <TableCell colSpan={6} className="text-center py-12 text-muted-foreground">
                   <RefreshCw className="w-4 h-4 animate-spin inline-block mr-2" />
                   Loading…
                 </TableCell>
               </TableRow>
             ) : filteredQuotations.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={4} className="text-center py-12 text-muted-foreground">
-                  No saved quotations. Create one in the Compare tab.
+                <TableCell colSpan={6} className="text-center py-12 text-muted-foreground">
+                  No saved quotations. Use the Create button to add one.
                 </TableCell>
               </TableRow>
             ) : (
-              filteredQuotations.map((q) => (
+              paginatedQuotations.map((q) => (
                 <TableRow key={q.id}>
                   <TableCell className="font-medium">
                     {q.name ?? <span className="italic text-muted-foreground">—</span>}
+                  </TableCell>
+                  <TableCell className="text-muted-foreground text-sm">
+                    {q.client_id ? (clientById.get(q.client_id)?.name ?? "—") : "—"}
                   </TableCell>
                   <TableCell>
                     <div className="flex flex-wrap gap-1">
@@ -244,25 +318,114 @@ export default function CotizacionesGuardadas() {
                       ))}
                     </div>
                   </TableCell>
+                  <TableCell>
+                    <Badge variant={(q.status ?? "active") === "archived" ? "outline" : "secondary"} className="text-xs">
+                      {(q.status ?? "active") === "archived" ? "Archived" : "Active"}
+                    </Badge>
+                  </TableCell>
                   <TableCell className="text-muted-foreground text-sm">
                     {formatDate(q.created_at)}
                   </TableCell>
                   <TableCell className="text-right">
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      className="h-8 w-8"
-                      onClick={() => setViewingQuotation(q)}
-                      aria-label="View quotation"
-                    >
-                      <Eye className="w-4 h-4" />
-                    </Button>
+                    <div className="flex items-center justify-end gap-2">
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            className="h-8 w-8"
+                            onClick={() => setViewingQuotation(q)}
+                            aria-label="View quotation"
+                          >
+                            <Eye className="w-4 h-4" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>Ver cotización</TooltipContent>
+                      </Tooltip>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            className="h-8 w-8"
+                            onClick={() => navigate(`/quotations/${q.id}/edit`)}
+                            aria-label="Edit quotation"
+                          >
+                            <Pencil className="w-4 h-4" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>Editar</TooltipContent>
+                      </Tooltip>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            className="h-8 w-8"
+                            onClick={() => handleExportXlsx(q)}
+                            aria-label="Download XLSX"
+                          >
+                            <FileDown className="w-4 h-4" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>Descargar XLSX</TooltipContent>
+                      </Tooltip>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            className="h-8 w-8"
+                            onClick={() => handleArchive(q)}
+                            aria-label={(q.status ?? "active") === "archived" ? "Restore quotation" : "Archive quotation"}
+                          >
+                            {(q.status ?? "active") === "archived" ? (
+                              <ArchiveRestore className="w-4 h-4" />
+                            ) : (
+                              <Archive className="w-4 h-4" />
+                            )}
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          {(q.status ?? "active") === "archived" ? "Restaurar" : "Archivar"}
+                        </TooltipContent>
+                      </Tooltip>
+                    </div>
                   </TableCell>
                 </TableRow>
               ))
             )}
           </TableBody>
         </Table>
+        {filteredQuotations.length > 0 && (
+          <div className="flex items-center justify-between px-4 py-3 border-t border-border bg-muted/50 rounded-b-xl text-sm text-muted-foreground">
+            <span>
+              Showing {((page - 1) * pageSize) + 1}-{Math.min(page * pageSize, filteredQuotations.length)} of {filteredQuotations.length}
+            </span>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                disabled={page <= 1}
+              >
+                Previous
+              </Button>
+              <span className="text-xs">
+                Page {page} of {totalPages}
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                disabled={page >= totalPages}
+              >
+                Next
+              </Button>
+            </div>
+          </div>
+        )}
+        </div>
       </div>
 
       <Dialog open={viewingQuotation !== null} onOpenChange={(open) => !open && setViewingQuotation(null)}>
@@ -350,10 +513,34 @@ export default function CotizacionesGuardadas() {
                           const byType = cell as CellByType;
                           const types = viewingQuotation.snapshot.rateTypes ?? RATE_TYPES;
                           const allPrefixes = types.flatMap((t) => (byType[t]?.prefixes ?? []));
+                          const uniquePrefixes = [...new Set(allPrefixes)];
+                          const prefixDisplay =
+                            uniquePrefixes.length <= 3
+                              ? uniquePrefixes.join(", ")
+                              : uniquePrefixes.slice(0, 3).join(", ") + ` (+${uniquePrefixes.length - 3} prefixes)`;
                           return (
                             <React.Fragment key={v.id}>
                               <td className="px-4 py-2 border-l border-border font-mono text-xs">
-                                {[...new Set(allPrefixes)].join(", ") || "—"}
+                                {uniquePrefixes.length ? (
+                                  uniquePrefixes.length > 3 ? (
+                                    <Tooltip>
+                                      <TooltipTrigger asChild>
+                                        <span className="cursor-help underline decoration-dotted">{prefixDisplay}</span>
+                                      </TooltipTrigger>
+                                      <TooltipContent>
+                                        <ul className="max-h-48 overflow-y-auto list-disc list-inside text-left space-y-0.5 font-mono text-xs">
+                                          {[...uniquePrefixes].sort().map((p, i) => (
+                                            <li key={i}>{p}</li>
+                                          ))}
+                                        </ul>
+                                      </TooltipContent>
+                                    </Tooltip>
+                                  ) : (
+                                    prefixDisplay
+                                  )
+                                ) : (
+                                  "—"
+                                )}
                               </td>
                               {types.map((t) => {
                                 const c = byType[t];
@@ -368,10 +555,35 @@ export default function CotizacionesGuardadas() {
                           );
                         }
                         const c = cell as { prefixes?: string[]; rate?: number; ratePlusExtra?: number | null } | undefined;
+                        const legacyPrefixes = c?.prefixes ?? [];
+                        const legacyUnique = [...new Set(legacyPrefixes)];
+                        const legacyDisplay =
+                          legacyUnique.length <= 3
+                            ? legacyUnique.join(", ")
+                            : legacyUnique.slice(0, 3).join(", ") + ` (+${legacyUnique.length - 3} prefixes)`;
                         return (
                           <React.Fragment key={v.id}>
                             <td className="px-4 py-2 border-l border-border font-mono text-xs">
-                              {c?.prefixes?.join(", ") ?? "—"}
+                              {legacyUnique.length ? (
+                                legacyUnique.length > 3 ? (
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <span className="cursor-help underline decoration-dotted">{legacyDisplay}</span>
+                                    </TooltipTrigger>
+                                    <TooltipContent>
+                                      <ul className="max-h-48 overflow-y-auto list-disc list-inside text-left space-y-0.5 font-mono text-xs">
+                                        {[...legacyUnique].sort().map((p, i) => (
+                                          <li key={i}>{p}</li>
+                                        ))}
+                                      </ul>
+                                    </TooltipContent>
+                                  </Tooltip>
+                                ) : (
+                                  legacyDisplay
+                                )
+                              ) : (
+                                "—"
+                              )}
                             </td>
                             <td className="px-4 py-2 font-mono">
                               {c?.rate != null ? c.rate.toFixed(4) : "—"}

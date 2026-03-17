@@ -1,5 +1,4 @@
 import { useMemo, useState, useEffect } from "react";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -21,61 +20,56 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { supabase } from "@/integrations/supabase/client";
-import { RefreshCw, Eye, Pencil, Trash2, Plus } from "lucide-react";
+import { RefreshCw, Pencil, Trash2, Eye, Plus } from "lucide-react";
 
-type VendorStatus = "activado" | "desactivado";
-
-type Vendor = {
+type Client = {
   id: string;
-  nombre: string;
-  descripcion?: string | null;
-  estado: VendorStatus;
+  name: string;
+  description: string | null;
 };
 
 const PAGE_SIZE = 10;
 
-const AjustesVendor = () => {
-  const [vendors, setVendors] = useState<Vendor[]>([]);
+const AjustesClients = () => {
+  const [clients, setClients] = useState<Client[]>([]);
   const [loading, setLoading] = useState(true);
-  const [page, setPage] = useState(1);
-  const [selectedVendor, setSelectedVendor] = useState<Vendor | null>(null);
+  const [selectedClient, setSelectedClient] = useState<Client | null>(null);
   const [mode, setMode] = useState<"crear" | "editar" | "ver">("crear");
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [page, setPage] = useState(1);
 
-  const [formNombre, setFormNombre] = useState("");
-  const [formDescripcion, setFormDescripcion] = useState("");
-  const [formEstado, setFormEstado] = useState<VendorStatus>("activado");
+  const [formName, setFormName] = useState("");
+  const [formDescription, setFormDescription] = useState("");
 
-  const totalPages = Math.max(1, Math.ceil(vendors.length / PAGE_SIZE));
-  const paginatedVendors = vendors.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
-
-  const fetchVendors = async () => {
+  const fetchClients = async () => {
     setLoading(true);
     const { data, error } = await supabase
-      .from("vendors")
-      .select("id, nombre, descripcion, estado")
-      .order("nombre");
-    if (!error && data) setVendors(data);
+      .from("clients")
+      .select("id, name, description")
+      .order("name");
+    if (!error && data) setClients(data as Client[]);
     setLoading(false);
   };
 
   useEffect(() => {
-    fetchVendors();
+    fetchClients();
   }, []);
+
+  const totalPages = Math.max(1, Math.ceil(clients.length / PAGE_SIZE));
+  const paginatedClients = clients.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
 
   const isReadOnly = mode === "ver";
   const dialogTitle = useMemo(() => {
-    if (mode === "crear") return "Create vendor";
-    if (mode === "editar") return "Edit vendor";
-    return "Vendor details";
+    if (mode === "crear") return "Create client";
+    if (mode === "editar") return "Edit client";
+    return "Client details";
   }, [mode]);
 
   const resetForm = () => {
-    setFormNombre("");
-    setFormDescripcion("");
-    setFormEstado("activado");
-    setSelectedVendor(null);
+    setFormName("");
+    setFormDescription("");
+    setSelectedClient(null);
     setMode("crear");
   };
 
@@ -85,37 +79,35 @@ const AjustesVendor = () => {
     setIsDialogOpen(true);
   };
 
-  const openViewDialog = (vendor: Vendor) => {
-    setSelectedVendor(vendor);
-    setFormNombre(vendor.nombre);
-    setFormDescripcion(vendor.descripcion ?? "");
-    setFormEstado(vendor.estado);
+  const openViewDialog = (client: Client) => {
+    setSelectedClient(client);
+    setFormName(client.name);
+    setFormDescription(client.description ?? "");
     setMode("ver");
     setIsDialogOpen(true);
   };
 
-  const openEditDialog = (vendor: Vendor) => {
-    setSelectedVendor(vendor);
-    setFormNombre(vendor.nombre);
-    setFormDescripcion(vendor.descripcion ?? "");
-    setFormEstado(vendor.estado);
+  const openEditDialog = (client: Client) => {
+    setSelectedClient(client);
+    setFormName(client.name);
+    setFormDescription(client.description ?? "");
     setMode("editar");
     setIsDialogOpen(true);
   };
 
-  const handleDelete = async (vendor: Vendor) => {
+  const handleDelete = async (client: Client) => {
     const confirmDelete = window.confirm(
-      `Are you sure you want to delete the vendor "${vendor.nombre}"?`,
+      `Are you sure you want to delete the client "${client.name}"?`,
     );
     if (!confirmDelete) return;
 
-    const { error } = await supabase.from("vendors").delete().eq("id", vendor.id);
+    const { error } = await supabase.from("clients").delete().eq("id", client.id);
     if (error) {
       alert(`Error deleting: ${error.message}`);
       return;
     }
-    setVendors((prev) => prev.filter((v) => v.id !== vendor.id));
-    if (selectedVendor?.id === vendor.id) {
+    setClients((prev) => prev.filter((c) => c.id !== client.id));
+    if (selectedClient?.id === client.id) {
       resetForm();
       setIsDialogOpen(false);
     }
@@ -124,7 +116,7 @@ const AjustesVendor = () => {
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
 
-    if (!formNombre.trim()) {
+    if (!formName.trim()) {
       alert("Name is required.");
       return;
     }
@@ -132,44 +124,41 @@ const AjustesVendor = () => {
     setSaving(true);
     if (mode === "crear") {
       const { data, error } = await supabase
-        .from("vendors")
+        .from("clients")
         .insert({
-          nombre: formNombre.trim(),
-          descripcion: formDescripcion.trim() || null,
-          estado: formEstado,
+          name: formName.trim(),
+          description: formDescription.trim() || null,
         })
-        .select("id, nombre, descripcion, estado")
+        .select("id, name, description")
         .single();
       if (error) {
         alert(`Error creating: ${error.message}`);
         setSaving(false);
         return;
       }
-      if (data) setVendors((prev) => [data, ...prev]);
-    } else if (mode === "editar" && selectedVendor) {
+      if (data) setClients((prev) => [data as Client, ...prev]);
+    } else if (mode === "editar" && selectedClient) {
       const { error } = await supabase
-        .from("vendors")
+        .from("clients")
         .update({
-          nombre: formNombre.trim(),
-          descripcion: formDescripcion.trim() || null,
-          estado: formEstado,
+          name: formName.trim(),
+          description: formDescription.trim() || null,
         })
-        .eq("id", selectedVendor.id);
+        .eq("id", selectedClient.id);
       if (error) {
         alert(`Error saving: ${error.message}`);
         setSaving(false);
         return;
       }
-      setVendors((prev) =>
-        prev.map((v) =>
-          v.id === selectedVendor.id
+      setClients((prev) =>
+        prev.map((c) =>
+          c.id === selectedClient.id
             ? {
-                ...v,
-                nombre: formNombre.trim(),
-                descripcion: formDescripcion.trim() || null,
-                estado: formEstado,
+                ...c,
+                name: formName.trim(),
+                description: formDescription.trim() || null,
               }
-            : v,
+            : c,
         ),
       );
     }
@@ -183,19 +172,18 @@ const AjustesVendor = () => {
       <div className="flex items-center justify-between gap-4">
         <div className="space-y-1">
           <h1 className="text-2xl font-bold text-foreground">
-            Settings · Vendors
+            Settings · Clients
           </h1>
           <p className="text-sm text-muted-foreground max-w-xl">
-            Manage vendors that provide phone rates. You can create, edit, view
-            details, or delete records. Description is optional and status can be
-            enabled or disabled.
+            Manage clients. Each client can have many quotations. Create, edit,
+            view, or delete records.
           </p>
         </div>
         <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
           <DialogTrigger asChild>
             <Button variant="outline" size="sm" className="h-9 shrink-0 inline-flex items-center gap-2" onClick={openCreateDialog}>
               <Plus className="w-3.5 h-3.5" />
-              Create vendor
+              Create client
             </Button>
           </DialogTrigger>
           <DialogContent>
@@ -204,48 +192,33 @@ const AjustesVendor = () => {
             </DialogHeader>
             <form className="space-y-4" onSubmit={handleSubmit}>
               <div className="space-y-2">
-                  <Label htmlFor="nombre">
-                      Name <span className="text-destructive">*</span>
-                    </Label>
+                <Label htmlFor="name">
+                  Name <span className="text-destructive">*</span>
+                </Label>
                 <Input
-                  id="nombre"
-                  value={formNombre}
-                  onChange={(event) => setFormNombre(event.target.value)}
-                  placeholder="Ej. Telco MX"
+                  id="name"
+                  value={formName}
+                  onChange={(e) => setFormName(e.target.value)}
+                  placeholder="e.g. Acme Corp"
                   required
                   readOnly={isReadOnly}
                 />
               </div>
               <div className="space-y-2">
-                  <Label htmlFor="descripcion">
-                      Description{" "}
-                      <span className="text-muted-foreground text-xs">
-                        (optional)
-                      </span>
-                    </Label>
+                <Label htmlFor="description">
+                  Description{" "}
+                  <span className="text-muted-foreground text-xs">
+                    (optional)
+                  </span>
+                </Label>
                 <Textarea
-                  id="descripcion"
-                  value={formDescripcion}
-                  onChange={(event) => setFormDescripcion(event.target.value)}
-                  placeholder="Additional information about the vendor"
+                  id="description"
+                  value={formDescription}
+                  onChange={(e) => setFormDescription(e.target.value)}
+                  placeholder="Additional information about the client"
                   rows={3}
                   readOnly={isReadOnly}
                 />
-              </div>
-              <div className="space-y-2">
-                  <Label htmlFor="estado">Status</Label>
-                <select
-                  id="estado"
-                  className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-                  value={formEstado}
-                  onChange={(event) =>
-                    setFormEstado(event.target.value as VendorStatus)
-                  }
-                  disabled={isReadOnly}
-                >
-                    <option value="activado">Enabled</option>
-                    <option value="desactivado">Disabled</option>
-                </select>
               </div>
               <DialogFooter>
                 {isReadOnly ? (
@@ -258,15 +231,19 @@ const AjustesVendor = () => {
                   </Button>
                 ) : (
                   <>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          onClick={() => setIsDialogOpen(false)}
-                        >
-                          Cancel
-                        </Button>
-                        <Button type="submit" disabled={saving}>
-                      {saving ? "Saving…" : mode === "crear" ? "Create" : "Save changes"}
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => setIsDialogOpen(false)}
+                    >
+                      Cancel
+                    </Button>
+                    <Button type="submit" disabled={saving}>
+                      {saving
+                        ? "Saving…"
+                        : mode === "crear"
+                          ? "Create"
+                          : "Save changes"}
                     </Button>
                   </>
                 )}
@@ -282,7 +259,6 @@ const AjustesVendor = () => {
             <TableRow>
               <TableHead>Name</TableHead>
               <TableHead>Description</TableHead>
-              <TableHead className="w-32">Status</TableHead>
               <TableHead className="w-40 text-right">Actions</TableHead>
             </TableRow>
           </TableHeader>
@@ -290,59 +266,41 @@ const AjustesVendor = () => {
             {loading ? (
               <TableRow>
                 <TableCell
-                  colSpan={4}
+                  colSpan={3}
                   className="text-center py-12 text-sm text-muted-foreground"
                 >
                   <RefreshCw className="w-4 h-4 animate-spin inline-block mr-2" />
-                  Loading vendors…
+                  Loading clients…
                 </TableCell>
               </TableRow>
-            ) : vendors.length === 0 ? (
+            ) : clients.length === 0 ? (
               <TableRow>
                 <TableCell
-                  colSpan={4}
+                  colSpan={3}
                   className="text-center text-sm text-muted-foreground py-8"
                 >
-                  No vendors yet. Create the first one with the
-                  &quot;Create vendor&quot; button.
+                  No clients yet. Create the first one with the "Create client"
+                  button.
                 </TableCell>
               </TableRow>
             ) : (
-              paginatedVendors.map((vendor) => (
-                <TableRow key={vendor.id}>
-                  <TableCell className="font-medium">
-                    {vendor.nombre}
-                  </TableCell>
+              paginatedClients.map((client) => (
+                <TableRow key={client.id}>
+                  <TableCell className="font-medium">{client.name}</TableCell>
                   <TableCell className="text-muted-foreground">
-                    {vendor.descripcion ?? (
+                    {client.description ?? (
                       <span className="italic text-xs text-muted-foreground">
                         No description
                       </span>
                     )}
-                  </TableCell>
-                  <TableCell>
-                    <Badge
-                      variant={
-                        vendor.estado === "activado" ? "default" : "outline"
-                      }
-                      className={
-                        vendor.estado === "activado"
-                          ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-300 border-emerald-500/30"
-                          : ""
-                      }
-                    >
-                      {vendor.estado === "activado"
-                        ? "Enabled"
-                        : "Disabled"}
-                    </Badge>
                   </TableCell>
                   <TableCell className="text-right space-x-2">
                     <Button
                       size="icon"
                       variant="ghost"
                       className="h-8 w-8"
-                      onClick={() => openViewDialog(vendor)}
-                      aria-label={`View vendor ${vendor.nombre}`}
+                      onClick={() => openViewDialog(client)}
+                      aria-label={`View client ${client.name}`}
                     >
                       <Eye className="w-4 h-4" />
                     </Button>
@@ -350,8 +308,8 @@ const AjustesVendor = () => {
                       size="icon"
                       variant="ghost"
                       className="h-8 w-8"
-                      onClick={() => openEditDialog(vendor)}
-                      aria-label={`Edit vendor ${vendor.nombre}`}
+                      onClick={() => openEditDialog(client)}
+                      aria-label={`Edit client ${client.name}`}
                     >
                       <Pencil className="w-4 h-4" />
                     </Button>
@@ -359,8 +317,8 @@ const AjustesVendor = () => {
                       size="icon"
                       variant="ghost"
                       className="h-8 w-8 text-destructive hover:text-destructive"
-                      onClick={() => handleDelete(vendor)}
-                      aria-label={`Delete vendor ${vendor.nombre}`}
+                      onClick={() => handleDelete(client)}
+                      aria-label={`Delete client ${client.name}`}
                     >
                       <Trash2 className="w-4 h-4" />
                     </Button>
@@ -370,10 +328,10 @@ const AjustesVendor = () => {
             )}
           </TableBody>
         </Table>
-        {vendors.length > 0 && (
+        {clients.length > 0 && (
           <div className="flex items-center justify-between px-4 py-3 border-t border-border bg-muted/50 rounded-b-xl text-sm text-muted-foreground">
             <span>
-              Showing {((page - 1) * PAGE_SIZE) + 1}-{Math.min(page * PAGE_SIZE, vendors.length)} of {vendors.length}
+              Showing {((page - 1) * PAGE_SIZE) + 1}-{Math.min(page * PAGE_SIZE, clients.length)} of {clients.length}
             </span>
             <div className="flex items-center gap-2">
               <Button variant="outline" size="sm" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1}>
@@ -391,5 +349,4 @@ const AjustesVendor = () => {
   );
 };
 
-export default AjustesVendor;
-
+export default AjustesClients;

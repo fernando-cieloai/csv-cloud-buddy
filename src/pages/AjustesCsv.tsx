@@ -3,17 +3,6 @@ import CsvUploader from "@/components/CsvUploader";
 const AjustesCsv = () => {
   return (
     <div className="space-y-12">
-      <div className="rounded-2xl border border-border bg-card p-8 space-y-3">
-        <h1 className="text-2xl font-bold text-foreground">
-          Settings · Upload CSV
-        </h1>
-        <p className="text-sm text-muted-foreground">
-          Upload a CSV or XLSX file with your phone rates. The file must follow
-          the expected format (first row = header) for records to be processed correctly.
-        </p>
-      </div>
-
-      {/* Upload section (contenido original de la home) */}
       <div>
         <div className="mb-8 text-center space-y-2">
           <h2 className="text-3xl font-bold text-foreground">

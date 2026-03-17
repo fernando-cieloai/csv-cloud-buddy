@@ -7,7 +7,10 @@ import MainLayout from "@/components/MainLayout";
 import Index from "./pages/Index";
 import NotFound from "./pages/NotFound";
 import Cotizaciones from "./pages/Cotizaciones";
+import CotizacionesCreate from "./pages/CotizacionesCreate";
+import CotizacionesEdit from "./pages/CotizacionesEdit";
 import AjustesVendor from "./pages/AjustesVendor";
+import AjustesClients from "./pages/AjustesClients";
 import AjustesCsv from "./pages/AjustesCsv";
 import AjustesPaises from "./pages/AjustesPaises";
 
@@ -23,6 +26,9 @@ const App = () => (
           <Route element={<MainLayout />}>
             <Route path="/" element={<Index />} />
             <Route path="/quotations" element={<Cotizaciones />} />
+            <Route path="/quotations/create" element={<CotizacionesCreate />} />
+            <Route path="/quotations/:id/edit" element={<CotizacionesEdit />} />
+            <Route path="/settings/clients" element={<AjustesClients />} />
             <Route path="/settings/vendor" element={<AjustesVendor />} />
             <Route path="/settings/csv" element={<AjustesCsv />} />
             <Route path="/settings/countries" element={<AjustesPaises />} />

@@ -19,7 +19,19 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-//test
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+
+interface Client {
+  id: string;
+  name: string;
+}
 interface Vendor {
   id: string;
   nombre: string;
@@ -59,7 +71,10 @@ function getRateType(rate_type: string | null): RateType {
   if (!rate_type) return "International";
   const normalized = rate_type.trim();
   if (RATE_TYPES.includes(normalized as RateType)) return normalized as RateType;
-  return "International";
+  // Case-insensitive fallback for DB/snapshot variations (e.g. "local" -> "Local")
+  const lower = normalized.toLowerCase();
+  const match = RATE_TYPES.find((rt) => rt.toLowerCase() === lower);
+  return (match as RateType) ?? "International";
 }
 
 function getLineType(line_type: string | null): LineType {
@@ -69,11 +84,45 @@ function getLineType(line_type: string | null): LineType {
   return "others";
 }
 
+interface SnapshotRow {
+  country: string;
+  lineType?: string;
+  type?: string;
+  byVendor: Record<string, Record<string, { prefixes: string[]; rate: number; ratePlusExtra: number | null }> | { prefixes?: string[]; rate?: number; ratePlusExtra?: number | null }>;
+}
+
 export interface ComparacionCotizacionesProps {
+  editQuotationId?: string;
   onSaved?: () => void;
 }
 
-export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizacionesProps = {}) {
+interface SavedQuotationRow {
+  country: string;
+  lineType?: string;
+  type?: string;
+  byVendor: Record<
+    string,
+    | { prefixes: string[]; rate: number; ratePlusExtra: number | null }
+    | Record<string, { prefixes: string[]; rate: number; ratePlusExtra: number | null }>
+  >;
+}
+
+interface SavedQuotation {
+  id: string;
+  name: string | null;
+  vendor_ids: string[];
+  client_id: string | null;
+  status: string;
+  snapshot: {
+    vendors: { id: string; nombre: string }[];
+    rateTypes?: string[];
+    extra?: { countries: string[]; value: number };
+    rows: SavedQuotationRow[];
+  };
+}
+
+export default function ComparacionCotizaciones({ editQuotationId, onSaved }: ComparacionCotizacionesProps = {}) {
+  const [editQuotation, setEditQuotation] = useState<SavedQuotation | null>(null);
   const [vendors, setVendors] = useState<Vendor[]>([]);
   const [uploads, setUploads] = useState<Upload[]>([]);
   const [rates, setRates] = useState<AggregatedRateRow[]>([]);
@@ -88,7 +137,6 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
   const [extraCountries, setExtraCountries] = useState<Set<string>>(new Set());
   const [extraValueInput, setExtraValueInput] = useState("");
   const [appliedExtra, setAppliedExtra] = useState<{ countries: Set<string>; value: number } | null>(null);
-  const [expandedPrefixes, setExpandedPrefixes] = useState<string[] | null>(null);
   const [countriesFromDb, setCountriesFromDb] = useState<{ id: string; nombre: string; region_id: string | null }[]>([]);
   const [countriesFromRates, setCountriesFromRates] = useState<string[]>([]);
   const [regionsFromDb, setRegionsFromDb] = useState<{ id: string; nombre: string }[]>([]);
@@ -98,6 +146,8 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
   const [selectedExtraRegions, setSelectedExtraRegions] = useState<Set<string>>(new Set());
   const [saveDialogOpen, setSaveDialogOpen] = useState(false);
   const [saveName, setSaveName] = useState("");
+  const [saveClientId, setSaveClientId] = useState<string>("__none__");
+  const [clients, setClients] = useState<{ id: string; name: string }[]>([]);
   const [saving, setSaving] = useState(false);
   const [page, setPage] = useState(1);
   const [pageSize] = useState(50);
@@ -107,6 +157,7 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
   const [countriesSearch, setCountriesSearch] = useState("");
   const [vendorsSearch, setVendorsSearch] = useState("");
   const [extraCountriesSearch, setExtraCountriesSearch] = useState("");
+  const [selectedBestVendorPerRow, setSelectedBestVendorPerRow] = useState<Record<string, string>>({});
 
   const countriesRef = useRef<HTMLDivElement>(null);
   const vendorsRef = useRef<HTMLDivElement>(null);
@@ -130,7 +181,7 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
     setLoading(true);
     setError(null);
     try {
-      const [vendorsRes, uploadsRes, countriesRes, regionsRes] = await Promise.all([
+      const [vendorsRes, uploadsRes, countriesRes, regionsRes, clientsRes] = await Promise.all([
         supabase.from("vendors").select("id, nombre").order("nombre"),
         supabase
           .from("csv_uploads")
@@ -139,15 +190,18 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
           .order("created_at", { ascending: false }),
         supabase.from("countries").select("id, nombre, region_id").order("nombre"),
         supabase.from("regions").select("id, nombre").order("nombre"),
+        supabase.from("clients").select("id, name").order("name"),
       ]);
 
       if (vendorsRes.error) throw new Error(vendorsRes.error.message);
       if (uploadsRes.error) throw new Error(uploadsRes.error.message);
       if (countriesRes.error) throw new Error(countriesRes.error.message);
       if (regionsRes.error) throw new Error(regionsRes.error.message);
+      if (clientsRes.error) throw new Error(clientsRes.error.message);
 
       setVendors(vendorsRes.data ?? []);
       setUploads(uploadsRes.data ?? []);
+      setClients((clientsRes.data ?? []) as { id: string; name: string }[]);
       setRates([]);
       setCountriesFromDb(countriesRes.data ?? []);
       setRegionsFromDb(regionsRes.data ?? []);
@@ -312,14 +366,53 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
   }, []);
 
   useEffect(() => {
+    if (!editQuotationId) return;
+    let cancelled = false;
+    (async () => {
+      const { data, error: fetchErr } = await supabase
+        .from("saved_quotations")
+        .select("id, name, vendor_ids, client_id, status, snapshot")
+        .eq("id", editQuotationId)
+        .single();
+      if (cancelled) return;
+      if (fetchErr || !data) {
+        setError(fetchErr?.message ?? "Quotation not found");
+        setLoading(false);
+        return;
+      }
+      const q = data as unknown as SavedQuotation;
+      setEditQuotation(q);
+      const snap = q.snapshot;
+      setSaveName(q.name ?? "");
+      setSaveClientId(q.client_id ?? "__none__");
+      setSelectedVendorIds(new Set((snap.vendors ?? []).map((v) => v.id)));
+      const uniqueCountries = [...new Set((snap.rows ?? []).map((r) => r.country))];
+      setSelectedCountries(new Set(uniqueCountries));
+      setFilterMode("country");
+      setSelectedRegions(new Set());
+      if (snap.extra) {
+        setExtraCountries(new Set(snap.extra.countries));
+        setExtraValueInput(String(snap.extra.value));
+        setAppliedExtra({ countries: new Set(snap.extra.countries), value: snap.extra.value });
+        setExtraFilterMode("country");
+        setSelectedExtraRegions(new Set());
+      }
+      setTotalCountries((snap.rows ?? []).length);
+      setCountriesFromRates(uniqueCountries);
+    })();
+    return () => { cancelled = true; };
+  }, [editQuotationId]);
+
+  useEffect(() => {
     setPage(1);
   }, [effectiveCountryFilter, search, selectedVendorIds]);
 
   useEffect(() => {
+    if (editQuotationId) return;
     if (!loading && uploads.length > 0) {
       fetchRates();
     }
-  }, [loading, uploads.length, fetchRates]);
+  }, [loading, uploads.length, fetchRates, editQuotationId]);
 
   useEffect(() => {
     const loadCountriesFromRates = async () => {
@@ -333,8 +426,8 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
       });
       setCountriesFromRates((data ?? []).map((r: { country: string }) => r.country));
     };
-    if (!loading) loadCountriesFromRates();
-  }, [loading, getUploadIdsForRates]);
+    if (!loading && !editQuotationId) loadCountriesFromRates();
+  }, [loading, getUploadIdsForRates, editQuotationId]);
 
   const effectiveExtraCountries = useMemo(() => {
     if (extraFilterMode === "country") return extraCountries;
@@ -522,7 +615,55 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
     return list;
   };
 
+  interface VendorCellByType {
+    prefixes: string[];
+    rate: number;
+  }
+
+  const buildTableRowsFromSnapshot = (
+    snapshot: SavedQuotation["snapshot"],
+    searchQ: string
+  ): { country: string; lineType: LineType; byVendor: Map<string, Partial<Record<RateType, VendorCellByType>>> }[] => {
+    const rateTypes = (snapshot.rateTypes ?? RATE_TYPES) as readonly string[];
+    const rows = snapshot.rows ?? [];
+    const list = rows.map((row) => {
+      const lineType = getLineType(row.lineType ?? row.type ?? null);
+      const byVendor = new Map<string, Partial<Record<RateType, VendorCellByType>>>();
+      for (const [vendorId, vendorCells] of Object.entries(row.byVendor ?? {})) {
+        const cell = vendorCells as
+          | Record<string, { prefixes: string[]; rate: number; ratePlusExtra: number | null }>
+          | { prefixes?: string[]; rate?: number; ratePlusExtra?: number | null };
+        const hasMulti = cell && (cell["International"] !== undefined || (cell as Record<string, unknown>)["mobile"] !== undefined);
+        const byType: Partial<Record<RateType, VendorCellByType>> = {};
+        if (hasMulti && typeof cell === "object") {
+          for (const t of rateTypes) {
+            const c = (cell as Record<string, { prefixes?: string[]; rate?: number }>)[t];
+            if (c) {
+              const rt = getRateType(t);
+              byType[rt] = { prefixes: c.prefixes ?? [], rate: c.rate ?? 0 };
+            }
+          }
+        } else {
+          const leg = cell as { prefixes?: string[]; rate?: number };
+          byType["International" as RateType] = {
+            prefixes: leg?.prefixes ?? [],
+            rate: leg?.rate ?? 0,
+          };
+        }
+        if (Object.keys(byType).length > 0) byVendor.set(vendorId, byType);
+      }
+      return { country: row.country, lineType, byVendor };
+    });
+    let filtered = list.filter((row) => row.byVendor.size > 0);
+    if (searchQ) filtered = filtered.filter((x) => x.country.toLowerCase().includes(searchQ));
+    filtered.sort((a, b) => a.country.localeCompare(b.country) || LINE_TYPES.indexOf(a.lineType) - LINE_TYPES.indexOf(b.lineType));
+    return filtered;
+  };
+
   const fetchAllRatesForExport = async () => {
+    if (editQuotation) {
+      return buildTableRowsFromSnapshot(editQuotation.snapshot, search.toLowerCase().trim());
+    }
     const uploadIds = getUploadIdsForRates;
     if (uploadIds.length === 0) return [];
     const vendorList =
@@ -607,15 +748,77 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
     setExportingOrSaving(true);
     toast.info("Preparing save…");
     try {
+      if (editQuotationId && editQuotation) {
+        const snap = editQuotation.snapshot;
+        const extraCountriesSet = appliedExtra ? new Set(appliedExtra.countries) : new Set<string>();
+        const rows = (snap.rows ?? []).map((row) => {
+          const inExtra = appliedExtra && extraCountriesSet.has(row.country);
+          const rateTypes = (snap.rateTypes ?? RATE_TYPES) as readonly string[];
+          const byVendor: Record<string, Record<string, { prefixes: string[]; rate: number; ratePlusExtra: number | null }>> = {};
+          for (const [vendorId, vendorCells] of Object.entries(row.byVendor ?? {})) {
+            const cell = vendorCells as Record<string, { prefixes?: string[]; rate?: number; ratePlusExtra?: number | null }>;
+            const hasMulti = rateTypes.some((t) => cell[t] != null);
+            if (hasMulti) {
+              byVendor[vendorId] = {};
+              for (const t of rateTypes) {
+                const c = cell[t];
+                if (c) {
+                  byVendor[vendorId][t] = {
+                    prefixes: c.prefixes ?? [],
+                    rate: c.rate ?? 0,
+                    ratePlusExtra: inExtra && appliedExtra ? (c.rate ?? 0) + appliedExtra.value : null,
+                  };
+                }
+              }
+            } else {
+              const leg = cell as { prefixes?: string[]; rate?: number };
+              byVendor[vendorId] = {
+                International: {
+                  prefixes: leg?.prefixes ?? [],
+                  rate: leg?.rate ?? 0,
+                  ratePlusExtra: inExtra && appliedExtra ? (leg?.rate ?? 0) + appliedExtra.value : null,
+                },
+              };
+            }
+          }
+          return { ...row, byVendor };
+        });
+        const extraCountriesList = appliedExtra ? [...appliedExtra.countries] : [];
+        const snapshot = {
+          ...snap,
+          rows,
+          ...(appliedExtra && {
+            extra: { countries: extraCountriesList, value: appliedExtra.value },
+          }),
+        };
+        const { error } = await supabase
+          .from("saved_quotations")
+          .update({
+            name: saveName.trim() || null,
+            vendor_ids: editQuotation.vendor_ids,
+            snapshot,
+            client_id: saveClientId === "__none__" || !saveClientId.trim() ? null : saveClientId,
+          })
+          .eq("id", editQuotationId);
+        if (error) throw error;
+        setSaveDialogOpen(false);
+        toast.success("Cotización actualizada");
+        onSaved?.();
+        return;
+      }
       const rowsToSave = await fetchAllRatesForExport();
       if (rowsToSave.length === 0) {
         toast.error("No data to save");
         return;
       }
+      const extraCountriesList = appliedExtra ? [...appliedExtra.countries] : [];
       const snapshot = {
         vendors: selectedVendorsList.map((v) => ({ id: v.id, nombre: v.nombre })),
         rateTypes: [...RATE_TYPES],
         lineTypes: [...LINE_TYPES],
+        ...(appliedExtra && {
+          extra: { countries: extraCountriesList, value: appliedExtra.value },
+        }),
         rows: rowsToSave.map((row) => ({
           country: row.country,
           lineType: row.lineType,
@@ -643,10 +846,13 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
         name: saveName.trim() || null,
         vendor_ids: selectedVendorsList.map((v) => v.id),
         snapshot,
+        client_id: saveClientId === "__none__" || !saveClientId.trim() ? null : saveClientId,
+        status: "active",
       });
       if (error) throw error;
       setSaveDialogOpen(false);
       setSaveName("");
+      setSaveClientId("__none__");
       toast.success("Cotización guardada");
       onSaved?.();
     } catch (err) {
@@ -662,36 +868,68 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
     rate: number;
   }
 
+  type RowByVendorMap = Map<string, Partial<Record<RateType, VendorCellByType>>>;
+
   const vendorListForTable = useMemo(
     () =>
-      selectedVendorIds.size > 0
-        ? vendorsWithUploads.filter((v) => selectedVendorIds.has(v.id))
-        : vendorsWithUploads,
-    [selectedVendorIds, vendorsWithUploads]
+      editQuotation?.snapshot?.vendors?.length
+        ? (editQuotation.snapshot.vendors as Vendor[])
+        : selectedVendorIds.size > 0
+          ? vendorsWithUploads.filter((v) => selectedVendorIds.has(v.id))
+          : vendorsWithUploads,
+    [editQuotation, selectedVendorIds, vendorsWithUploads]
   );
 
   const tableRows = useMemo(
     () =>
-      buildTableRowsFromAggregated(
-        rates,
-        effectiveCountryFilter,
-        vendorListForTable,
-        search.toLowerCase().trim()
-      ),
-    [rates, effectiveCountryFilter, vendorListForTable, search, uploadById]
+      editQuotation?.snapshot?.rows?.length
+        ? buildTableRowsFromSnapshot(editQuotation.snapshot, search.toLowerCase().trim())
+        : buildTableRowsFromAggregated(
+            rates,
+            effectiveCountryFilter,
+            vendorListForTable,
+            search.toLowerCase().trim()
+          ),
+    [editQuotation, rates, effectiveCountryFilter, vendorListForTable, search, uploadById]
   );
 
   const selectedVendorsList = useMemo(
     () =>
-      selectedVendorIds.size > 0
-        ? vendorsWithUploads.filter((v) => selectedVendorIds.has(v.id))
-        : [],
-    [selectedVendorIds, vendorsWithUploads]
+      editQuotation?.snapshot?.vendors?.length
+        ? (editQuotation.snapshot.vendors as Vendor[])
+        : selectedVendorIds.size > 0
+          ? vendorsWithUploads.filter((v) => selectedVendorIds.has(v.id))
+          : [],
+    [editQuotation, selectedVendorIds, vendorsWithUploads]
   );
 
   const totalPages = Math.max(1, Math.ceil(totalCountries / pageSize));
   const canPrev = page > 1;
   const canNext = page < totalPages;
+
+  /**
+   * Best vendor: prioritize vendors with MORE rate values (International, Origin Based, Local).
+   * Among vendors with the same count, pick the one with the lowest min rate.
+   */
+  const getBestVendorForRow = useCallback(
+    (row: { country: string; lineType: LineType; byVendor: RowByVendorMap }) => {
+      const candidates: { id: string; count: number; minRate: number }[] = [];
+      for (const [vendorId, byType] of row.byVendor) {
+        const rates = RATE_TYPES.map((t) => byType?.[t]?.rate).filter((r): r is number => r != null && r >= 0);
+        if (rates.length === 0) continue;
+        candidates.push({ id: vendorId, count: rates.length, minRate: Math.min(...rates) });
+      }
+      if (candidates.length === 0) return selectedVendorsList[0]?.id ?? null;
+      candidates.sort((a, b) => {
+        if (b.count !== a.count) return b.count - a.count;
+        return a.minRate - b.minRate;
+      });
+      return candidates[0].id;
+    },
+    [selectedVendorsList]
+  );
+
+  const getRowKey = (row: { country: string; lineType: LineType }) => `${row.country}\t${row.lineType}`;
 
   if (loading) {
     return (
@@ -912,7 +1150,7 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
         </div>
 
         <div className="grid gap-6 sm:grid-cols-2">
-          <div className="space-y-2">
+          <div className="space-y-2 sm:col-start-1">
             <div className="flex items-center justify-between gap-2">
               <Label>Apply extra to</Label>
               <div className="flex rounded-md border border-border overflow-hidden">
@@ -1031,8 +1269,7 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
             </Collapsible>
             </div>
           </div>
-
-          <div className="space-y-2">
+          <div className="space-y-2 sm:col-start-2">
             <Label>Extra amount (numeric)</Label>
             <div className="flex gap-2">
               <input
@@ -1094,7 +1331,7 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
             disabled={selectedVendorsList.length === 0 || totalCountries === 0 || exportingOrSaving}
           >
             <Save className="w-3.5 h-3.5 mr-1.5" />
-            Save quotation
+            {editQuotationId ? "Update quotation" : "Save quotation"}
           </Button>
         </div>
       </div>
@@ -1102,9 +1339,25 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
       <Dialog open={saveDialogOpen} onOpenChange={setSaveDialogOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Save quotation</DialogTitle>
+            <DialogTitle>{editQuotationId ? "Update quotation" : "Save quotation"}</DialogTitle>
           </DialogHeader>
           <div className="space-y-4 py-2">
+            <div className="space-y-2">
+              <Label>Client (optional)</Label>
+              <Select value={saveClientId} onValueChange={setSaveClientId}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select a client" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__none__">None</SelectItem>
+                  {clients.map((c) => (
+                    <SelectItem key={c.id} value={c.id}>
+                      {c.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
             <div className="space-y-2">
               <Label htmlFor="save-name">Name (optional)</Label>
               <Input
@@ -1115,19 +1368,19 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
                 onChange={(e) => setSaveName(e.target.value)}
               />
             </div>
-            <DialogFooter>
-              <Button variant="outline" onClick={() => setSaveDialogOpen(false)}>
-                Cancel
-              </Button>
-              <Button onClick={handleSaveQuotation} disabled={saving}>
-                {saving ? "Saving…" : "Save"}
-              </Button>
-            </DialogFooter>
           </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setSaveDialogOpen(false)}>
+              Cancel
+            </Button>
+            <Button onClick={handleSaveQuotation} disabled={saving}>
+              {saving ? (editQuotationId ? "Updating…" : "Saving…") : (editQuotationId ? "Update quotation" : "Save")}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      {selectedVendorsList.length === 0 || effectiveCountryFilter.size === 0 ? (
+      {(selectedVendorsList.length === 0 || effectiveCountryFilter.size === 0) && !(editQuotation && editQuotation.snapshot?.rows?.length) ? (
         <div className="flex flex-col items-center justify-center py-16 text-muted-foreground gap-2 rounded-2xl border border-border bg-card">
           <Building2 className="w-8 h-8 opacity-30" />
           <p className="text-sm">
@@ -1168,6 +1421,18 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
                       </span>
                     </th>
                   ))}
+                  <th
+                    rowSpan={2}
+                    className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide bg-muted/50 border-l-2 border-border min-w-[8rem] align-bottom"
+                  >
+                    Best vendor
+                  </th>
+                  <th
+                    colSpan={3}
+                    className="text-center px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide bg-muted/50 border-l-2 border-border min-w-[12rem]"
+                  >
+                    Selected vendor + extra
+                  </th>
                 </tr>
                 <tr className="border-b border-border">
                   {selectedVendorsList.flatMap((v) => [
@@ -1177,22 +1442,30 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
                     >
                       prefix
                     </th>,
-                    ...RATE_TYPES.map((t) => (
+                    ...RATE_TYPES.map((t, i) => (
                       <th
                         key={`${v.id}-${t}`}
-                        className="text-left px-4 py-1.5 text-[10px] font-normal normal-case text-muted-foreground bg-muted/50 border-l border-border min-w-[5rem]"
+                        className={`text-left px-4 py-1.5 text-[10px] font-normal normal-case text-muted-foreground bg-muted/50 min-w-[5rem] ${i === 0 ? "border-l-2 border-border" : "border-l border-border"}`}
                       >
                         {t} rate
                       </th>
                     )),
                   ])}
+                  {RATE_TYPES.map((t) => (
+                    <th
+                      key={`extra-${t}`}
+                      className="text-left px-4 py-1.5 text-[10px] font-normal normal-case text-muted-foreground bg-muted/50 border-l border-border min-w-[5.5rem]"
+                    >
+                      {t} + extra
+                    </th>
+                  ))}
                 </tr>
               </thead>
               <tbody>
                 {tableRows.length === 0 ? (
                   <tr>
                     <td
-                      colSpan={2 + selectedVendorsList.length * (1 + RATE_TYPES.length)}
+                      colSpan={2 + selectedVendorsList.length * (1 + RATE_TYPES.length) + 1 + RATE_TYPES.length}
                       className="px-4 py-8 text-center text-muted-foreground"
                     >
                       {search ? "No records match the filter." : "No records for selection."}
@@ -1223,34 +1496,34 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
                           const byType = row.byVendor.get(v.id);
                           const allPrefixes = RATE_TYPES.flatMap((t) => byType?.[t]?.prefixes ?? []);
                           const uniquePrefixes = [...new Set(allPrefixes)];
-                          const fullText = uniquePrefixes.join(", ");
-                          const showPreviewOnly = fullText.length > 50 || uniquePrefixes.length > 6;
-                          const displayText = showPreviewOnly
-                            ? uniquePrefixes.slice(0, 4).join(", ") + (uniquePrefixes.length > 4 ? ` (+${uniquePrefixes.length - 4} more)` : "")
-                            : fullText;
+                          const prefixDisplay =
+                            uniquePrefixes.length <= 3
+                              ? uniquePrefixes.join(", ")
+                              : uniquePrefixes.slice(0, 3).join(", ") + ` (+${uniquePrefixes.length - 3} prefixes)`;
                           return (
                             <React.Fragment key={v.id}>
                               <td
                                 className="px-4 py-2.5 border-l-2 border-border bg-card/50 font-mono text-xs align-top min-w-[6rem] max-w-[16rem]"
                               >
                                 {uniquePrefixes.length ? (
-                                  <div className="flex items-start gap-1 w-full min-w-0">
-                                    <span className="break-words whitespace-normal flex-1 min-w-0">
-                                      {displayText}
-                                    </span>
-                                    <button
-                                      type="button"
-                                      onClick={(e) => {
-                                        e.preventDefault();
-                                        e.stopPropagation();
-                                        setExpandedPrefixes([...uniquePrefixes]);
-                                      }}
-                                      className="flex-shrink-0 text-primary hover:underline focus:outline-none focus:ring-1 focus:ring-ring rounded px-1.5 py-1 min-w-[1.5rem] min-h-[1.5rem] inline-flex items-center justify-center"
-                                      title="Open full list"
-                                    >
-                                      …
-                                    </button>
-                                  </div>
+                                  uniquePrefixes.length > 3 ? (
+                                    <Tooltip>
+                                      <TooltipTrigger asChild>
+                                        <span className="break-words whitespace-normal cursor-help underline decoration-dotted">
+                                          {prefixDisplay}
+                                        </span>
+                                      </TooltipTrigger>
+                                      <TooltipContent>
+                                        <ul className="max-h-48 overflow-y-auto list-disc list-inside text-left space-y-0.5 font-mono text-xs">
+                                          {[...uniquePrefixes].sort().map((p, i) => (
+                                            <li key={i}>{p}</li>
+                                          ))}
+                                        </ul>
+                                      </TooltipContent>
+                                    </Tooltip>
+                                  ) : (
+                                    <span className="break-words whitespace-normal">{prefixDisplay}</span>
+                                  )
                                 ) : (
                                   <span className="text-muted-foreground italic">—</span>
                                 )}
@@ -1258,27 +1531,13 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
                               {RATE_TYPES.map((t) => {
                                 const cell = byType?.[t];
                                 const rate = cell?.rate;
-                                const withExtra =
-                                  rate != null &&
-                                  countryInExtra(row.country)
-                                    ? rate + appliedExtra.value
-                                    : rate;
                                 return (
                                   <td
                                     key={`${v.id}-${t}`}
-                                    className="px-4 py-2.5 border-l border-border bg-card/50"
-                                    title={
-                                      withExtra != null && countryInExtra(row.country)
-                                        ? `rate + ${appliedExtra?.value.toFixed(4)}`
-                                        : undefined
-                                    }
+                                    className="px-4 py-2.5 border-l-2 border-border bg-card/50 min-w-[5.5rem]"
                                   >
-                                    {withExtra != null ? (
-                                      <span
-                                        className={`font-mono ${countryInExtra(row.country) ? "font-medium text-foreground" : "text-foreground"}`}
-                                      >
-                                        {withExtra.toFixed(4)}
-                                      </span>
+                                    {rate != null ? (
+                                      <span className="font-mono text-foreground">{rate.toFixed(4)}</span>
                                     ) : (
                                       <span className="text-muted-foreground italic">—</span>
                                     )}
@@ -1288,6 +1547,58 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
                             </React.Fragment>
                           );
                         })}
+                        {(() => {
+                          const rowKey = getRowKey(row);
+                          const selectedVendorId = selectedBestVendorPerRow[rowKey] ?? getBestVendorForRow(row);
+                          const selectedVendor = selectedVendorsList.find((v) => v.id === selectedVendorId);
+                          const byType = selectedVendorId ? row.byVendor.get(selectedVendorId) : null;
+                          const extraVal = countryInExtra(row.country) ? appliedExtra?.value ?? 0 : 0;
+                          return (
+                            <>
+                              <td className="px-2 py-2 border-l-2 border-border bg-card/50 align-top">
+                                <Select
+                                  value={selectedVendorId ?? ""}
+                                  onValueChange={(val) =>
+                                    setSelectedBestVendorPerRow((prev) => ({ ...prev, [rowKey]: val }))
+                                  }
+                                >
+                                  <SelectTrigger className="h-8 text-xs min-w-[7rem]">
+                                    <SelectValue placeholder="Vendor" />
+                                  </SelectTrigger>
+                                  <SelectContent>
+                                    {selectedVendorsList.map((v) => (
+                                      <SelectItem key={v.id} value={v.id}>
+                                        {v.nombre}
+                                      </SelectItem>
+                                    ))}
+                                  </SelectContent>
+                                </Select>
+                              </td>
+                              {RATE_TYPES.map((t, i) => {
+                                const rate = byType?.[t]?.rate;
+                                const withExtra = rate != null && extraVal > 0 ? rate + extraVal : rate != null ? rate : null;
+                                const isLast = i === RATE_TYPES.length - 1;
+                                const isValidNumber =
+                                  withExtra != null &&
+                                  typeof withExtra === "number" &&
+                                  !Number.isNaN(withExtra);
+                                // Selected vendor + extra: background extends through Local + extra; always show "—" when no value
+                                return (
+                                  <td
+                                    key={`extra-${t}`}
+                                    className={`px-4 py-2.5 font-mono border-b border-border min-w-[5.5rem] !bg-muted/30 ${i === 0 ? "border-l-2 border-border" : "border-l border-border"} ${isLast ? "border-r-2 border-border" : ""}`}
+                                  >
+                                    {isValidNumber ? (
+                                      <span className="font-medium">{withExtra.toFixed(4)}</span>
+                                    ) : (
+                                      <span className="text-muted-foreground italic inline-block min-w-[1ch]">{"\u2014"}</span>
+                                    )}
+                                  </td>
+                                );
+                              })}
+                            </>
+                          );
+                        })()}
                       </tr>
                     );
                   })
@@ -1325,22 +1636,6 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
         </div>
       )}
 
-      <Dialog open={expandedPrefixes !== null} onOpenChange={(open) => !open && setExpandedPrefixes(null)}>
-        <DialogContent className="max-w-md max-h-[80vh] flex flex-col">
-          <DialogHeader>
-            <DialogTitle>All prefixes</DialogTitle>
-          </DialogHeader>
-          <div className="overflow-auto flex-1 min-h-0 rounded-lg bg-muted p-4">
-            {expandedPrefixes && (
-              <ul className="list-disc list-inside font-mono text-sm space-y-1">
-                {expandedPrefixes.map((p, i) => (
-                  <li key={i}>{p}</li>
-                ))}
-              </ul>
-            )}
-          </div>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }
