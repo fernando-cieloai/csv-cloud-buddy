@@ -259,7 +259,7 @@ export default function CotizacionesGuardadas() {
             <DateRangePicker
               from={filterDateFrom}
               to={filterDateTo}
-              onRangeChange={(from, to) => {
+              onChange={(from, to) => {
                 setFilterDateFrom(from ?? "");
                 setFilterDateTo(to ?? "");
               }}
