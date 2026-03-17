@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo } from "react";
+import React, { useEffect, useState, useMemo, useRef, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { RefreshCw, Search, ChevronDown, ChevronLeft, ChevronRight, Building2, Save, FileDown } from "lucide-react";
 import * as XLSX from "xlsx";
@@ -104,6 +104,27 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
   const [totalCountries, setTotalCountries] = useState(0);
   const [ratesLoading, setRatesLoading] = useState(false);
   const [exportingOrSaving, setExportingOrSaving] = useState(false);
+  const [countriesSearch, setCountriesSearch] = useState("");
+  const [vendorsSearch, setVendorsSearch] = useState("");
+  const [extraCountriesSearch, setExtraCountriesSearch] = useState("");
+
+  const countriesRef = useRef<HTMLDivElement>(null);
+  const vendorsRef = useRef<HTMLDivElement>(null);
+  const extraCountriesRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (countriesRef.current?.contains(target)) return;
+      if (vendorsRef.current?.contains(target)) return;
+      if (extraCountriesRef.current?.contains(target)) return;
+      setCountriesOpen(false);
+      setVendorsOpen(false);
+      setExtraCountriesOpen(false);
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
 
   const fetchData = async () => {
     setLoading(true);
@@ -164,6 +185,36 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
     [regionsFromDb]
   );
 
+  const filteredCountries = useMemo(() => {
+    const q = countriesSearch.trim().toLowerCase();
+    if (!q) return allCountries;
+    return allCountries.filter((c) => c.toLowerCase().includes(q));
+  }, [allCountries, countriesSearch]);
+
+  const filteredRegions = useMemo(() => {
+    const q = countriesSearch.trim().toLowerCase();
+    if (!q) return allRegions;
+    return allRegions.filter((r) => r.toLowerCase().includes(q));
+  }, [allRegions, countriesSearch]);
+
+  const filteredVendors = useMemo(() => {
+    const q = vendorsSearch.trim().toLowerCase();
+    if (!q) return vendorsWithUploads;
+    return vendorsWithUploads.filter((v) => v.nombre.toLowerCase().includes(q));
+  }, [vendorsWithUploads, vendorsSearch]);
+
+  const filteredExtraCountries = useMemo(() => {
+    const q = extraCountriesSearch.trim().toLowerCase();
+    if (!q) return allCountries;
+    return allCountries.filter((c) => c.toLowerCase().includes(q));
+  }, [allCountries, extraCountriesSearch]);
+
+  const filteredExtraRegions = useMemo(() => {
+    const q = extraCountriesSearch.trim().toLowerCase();
+    if (!q) return allRegions;
+    return allRegions.filter((r) => r.toLowerCase().includes(q));
+  }, [allRegions, extraCountriesSearch]);
+
   const regionToCountryNames = useMemo(() => {
     const m = new Map<string, string[]>();
     for (const r of regionsFromDb) m.set(r.nombre, []);
@@ -205,6 +256,11 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
   const fetchRates = React.useCallback(async () => {
     const uploadIds = getUploadIdsForRates;
     if (uploadIds.length === 0) {
+      setRates([]);
+      setTotalCountries(0);
+      return;
+    }
+    if (effectiveCountryFilter.size === 0) {
       setRates([]);
       setTotalCountries(0);
       return;
@@ -309,8 +365,17 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
   };
 
   const selectAllCountries = () => {
-    if (selectedCountries.size === allCountries.length) setSelectedCountries(new Set());
-    else setSelectedCountries(new Set(allCountries));
+    const list = filteredCountries;
+    const allSelected = list.length > 0 && list.every((c) => selectedCountries.has(c));
+    if (allSelected) {
+      setSelectedCountries((prev) => {
+        const next = new Set(prev);
+        for (const c of list) next.delete(c);
+        return next;
+      });
+    } else {
+      setSelectedCountries((prev) => new Set([...prev, ...list]));
+    }
   };
 
   const toggleRegion = (region: string) => {
@@ -323,8 +388,17 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
   };
 
   const selectAllRegions = () => {
-    if (selectedRegions.size === allRegions.length) setSelectedRegions(new Set());
-    else setSelectedRegions(new Set(allRegions));
+    const list = filteredRegions;
+    const allSelected = list.length > 0 && list.every((r) => selectedRegions.has(r));
+    if (allSelected) {
+      setSelectedRegions((prev) => {
+        const next = new Set(prev);
+        for (const r of list) next.delete(r);
+        return next;
+      });
+    } else {
+      setSelectedRegions((prev) => new Set([...prev, ...list]));
+    }
   };
 
   const toggleExtraRegion = (region: string) => {
@@ -337,13 +411,31 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
   };
 
   const selectAllExtraRegions = () => {
-    if (selectedExtraRegions.size === allRegions.length) setSelectedExtraRegions(new Set());
-    else setSelectedExtraRegions(new Set(allRegions));
+    const list = filteredExtraRegions;
+    const allSelected = list.length > 0 && list.every((r) => selectedExtraRegions.has(r));
+    if (allSelected) {
+      setSelectedExtraRegions((prev) => {
+        const next = new Set(prev);
+        for (const r of list) next.delete(r);
+        return next;
+      });
+    } else {
+      setSelectedExtraRegions((prev) => new Set([...prev, ...list]));
+    }
   };
 
   const selectAllVendors = () => {
-    if (selectedVendorIds.size === vendorsWithUploads.length) setSelectedVendorIds(new Set());
-    else setSelectedVendorIds(new Set(vendorsWithUploads.map((v) => v.id)));
+    const list = filteredVendors;
+    const allSelected = list.length > 0 && list.every((v) => selectedVendorIds.has(v.id));
+    if (allSelected) {
+      setSelectedVendorIds((prev) => {
+        const next = new Set(prev);
+        for (const v of list) next.delete(v.id);
+        return next;
+      });
+    } else {
+      setSelectedVendorIds((prev) => new Set([...prev, ...list.map((v) => v.id)]));
+    }
   };
 
   const toggleExtraCountry = (country: string) => {
@@ -356,17 +448,35 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
   };
 
   const selectAllExtraCountries = () => {
-    if (extraCountries.size === allCountries.length) setExtraCountries(new Set());
-    else setExtraCountries(new Set(allCountries));
+    const list = extraFilterMode === "country" ? filteredExtraCountries : filteredExtraRegions.flatMap((r) => regionToCountryNames.get(r) ?? []);
+    const allSelected = list.length > 0 && list.every((c) => extraCountries.has(c));
+    if (allSelected) {
+      setExtraCountries((prev) => {
+        const next = new Set(prev);
+        for (const c of list) next.delete(c);
+        return next;
+      });
+    } else {
+      setExtraCountries((prev) => new Set([...prev, ...list]));
+    }
   };
 
   const handleApplyExtra = () => {
+    if (effectiveExtraCountries.size === 0) {
+      toast.error("Select at least one country or region first");
+      return;
+    }
     const val = parseFloat(extraValueInput.replace(",", "."));
     if (Number.isNaN(val)) {
       setAppliedExtra(null);
       return;
     }
     setAppliedExtra({ countries: new Set(effectiveExtraCountries), value: val });
+  };
+
+  const handleExtraValueChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const v = e.target.value;
+    if (v === "" || /^-?\d*\.?\d*$/.test(v)) setExtraValueInput(v);
   };
 
   const countryInExtra = (country: string) =>
@@ -616,7 +726,10 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
               <div className="flex rounded-md border border-border overflow-hidden">
                 <button
                   type="button"
-                  onClick={() => setFilterMode("country")}
+                  onClick={() => {
+                    setFilterMode("country");
+                    setSelectedRegions(new Set());
+                  }}
                   className={`px-2.5 py-1 text-xs font-medium transition-colors ${
                     filterMode === "country" ? "bg-primary text-primary-foreground" : "bg-muted/50 text-muted-foreground hover:bg-muted"
                   }`}
@@ -625,7 +738,10 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
                 </button>
                 <button
                   type="button"
-                  onClick={() => setFilterMode("region")}
+                  onClick={() => {
+                    setFilterMode("region");
+                    setSelectedCountries(new Set());
+                  }}
                   className={`px-2.5 py-1 text-xs font-medium transition-colors border-l border-border ${
                     filterMode === "region" ? "bg-primary text-primary-foreground" : "bg-muted/50 text-muted-foreground hover:bg-muted"
                   }`}
@@ -634,7 +750,17 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
                 </button>
               </div>
             </div>
-            <Collapsible open={countriesOpen} onOpenChange={setCountriesOpen}>
+            <div ref={countriesRef} className="relative">
+            <Collapsible
+              open={countriesOpen}
+              onOpenChange={(open) => {
+                setCountriesOpen(open);
+                if (open) {
+                  setVendorsOpen(false);
+                  setExtraCountriesOpen(false);
+                }
+              }}
+            >
               <CollapsibleTrigger asChild>
                 <Button
                   variant="outline"
@@ -655,16 +781,24 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
               </CollapsibleTrigger>
               <CollapsibleContent>
                 <div className="mt-2 rounded-lg border border-border bg-muted/30 p-3 max-h-48 overflow-y-auto space-y-2">
+                  <input
+                    type="text"
+                    placeholder="Search…"
+                    value={countriesSearch}
+                    onChange={(e) => setCountriesSearch(e.target.value)}
+                    onClick={(e) => e.stopPropagation()}
+                    className="w-full px-2 py-1.5 text-xs rounded border border-border bg-background mb-2"
+                  />
                   {filterMode === "country" ? (
                     <>
                       <label className="flex items-center gap-2 text-sm cursor-pointer">
                         <Checkbox
-                          checked={selectedCountries.size === allCountries.length && allCountries.length > 0}
+                          checked={filteredCountries.length > 0 && filteredCountries.every((c) => selectedCountries.has(c))}
                           onCheckedChange={selectAllCountries}
                         />
                         <span className="text-muted-foreground">All</span>
                       </label>
-                      {allCountries.map((c) => (
+                      {filteredCountries.map((c) => (
                         <label key={c} className="flex items-center gap-2 text-sm cursor-pointer">
                           <Checkbox
                             checked={selectedCountries.has(c)}
@@ -673,20 +807,20 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
                           {c}
                         </label>
                       ))}
-                      {allCountries.length === 0 && (
-                        <p className="text-xs text-muted-foreground">No country data. Add countries in Settings.</p>
+                      {filteredCountries.length === 0 && (
+                        <p className="text-xs text-muted-foreground">{countriesSearch ? "No matches." : "No country data. Add countries in Settings."}</p>
                       )}
                     </>
                   ) : (
                     <>
                       <label className="flex items-center gap-2 text-sm cursor-pointer">
                         <Checkbox
-                          checked={selectedRegions.size === allRegions.length && allRegions.length > 0}
+                          checked={filteredRegions.length > 0 && filteredRegions.every((r) => selectedRegions.has(r))}
                           onCheckedChange={selectAllRegions}
                         />
                         <span className="text-muted-foreground">All</span>
                       </label>
-                      {allRegions.map((r) => (
+                      {filteredRegions.map((r) => (
                         <label key={r} className="flex items-center gap-2 text-sm cursor-pointer">
                           <Checkbox
                             checked={selectedRegions.has(r)}
@@ -695,19 +829,30 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
                           {r}
                         </label>
                       ))}
-                      {allRegions.length === 0 && (
-                        <p className="text-xs text-muted-foreground">No regions. Add regions in Settings.</p>
+                      {filteredRegions.length === 0 && (
+                        <p className="text-xs text-muted-foreground">{countriesSearch ? "No matches." : "No regions. Add regions in Settings."}</p>
                       )}
                     </>
                   )}
                 </div>
               </CollapsibleContent>
             </Collapsible>
+            </div>
           </div>
 
           <div className="space-y-2">
             <Label>Vendors</Label>
-            <Collapsible open={vendorsOpen} onOpenChange={setVendorsOpen}>
+            <div ref={vendorsRef} className="relative">
+            <Collapsible
+              open={vendorsOpen}
+              onOpenChange={(open) => {
+                setVendorsOpen(open);
+                if (open) {
+                  setCountriesOpen(false);
+                  setExtraCountriesOpen(false);
+                }
+              }}
+            >
               <CollapsibleTrigger asChild>
                 <Button
                   variant="outline"
@@ -724,17 +869,25 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
               </CollapsibleTrigger>
               <CollapsibleContent>
                 <div className="mt-2 rounded-lg border border-border bg-muted/30 p-3 max-h-48 overflow-y-auto space-y-2">
+                  <input
+                    type="text"
+                    placeholder="Search…"
+                    value={vendorsSearch}
+                    onChange={(e) => setVendorsSearch(e.target.value)}
+                    onClick={(e) => e.stopPropagation()}
+                    className="w-full px-2 py-1.5 text-xs rounded border border-border bg-background mb-2"
+                  />
                   <label className="flex items-center gap-2 text-sm cursor-pointer">
                     <Checkbox
                       checked={
-                        selectedVendorIds.size === vendorsWithUploads.length &&
-                        vendorsWithUploads.length > 0
+                        filteredVendors.length > 0 &&
+                        filteredVendors.every((v) => selectedVendorIds.has(v.id))
                       }
                       onCheckedChange={selectAllVendors}
                     />
                     <span className="text-muted-foreground">All</span>
                   </label>
-                  {vendorsWithUploads.map((v) => (
+                  {filteredVendors.map((v) => (
                     <label
                       key={v.id}
                       className="flex items-center gap-2 text-sm cursor-pointer"
@@ -746,14 +899,15 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
                       {v.nombre}
                     </label>
                   ))}
-                  {vendorsWithUploads.length === 0 && (
+                  {filteredVendors.length === 0 && (
                     <p className="text-xs text-muted-foreground">
-                      No vendors with uploaded files. Assign a vendor when uploading a CSV.
+                      {vendorsSearch ? "No matches." : "No vendors with uploaded files. Assign a vendor when uploading a CSV."}
                     </p>
                   )}
                 </div>
               </CollapsibleContent>
             </Collapsible>
+            </div>
           </div>
         </div>
 
@@ -764,7 +918,10 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
               <div className="flex rounded-md border border-border overflow-hidden">
                 <button
                   type="button"
-                  onClick={() => setExtraFilterMode("country")}
+                  onClick={() => {
+                    setExtraFilterMode("country");
+                    setSelectedExtraRegions(new Set());
+                  }}
                   className={`px-2.5 py-1 text-xs font-medium transition-colors ${
                     extraFilterMode === "country" ? "bg-primary text-primary-foreground" : "bg-muted/50 text-muted-foreground hover:bg-muted"
                   }`}
@@ -773,7 +930,10 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
                 </button>
                 <button
                   type="button"
-                  onClick={() => setExtraFilterMode("region")}
+                  onClick={() => {
+                    setExtraFilterMode("region");
+                    setExtraCountries(new Set());
+                  }}
                   className={`px-2.5 py-1 text-xs font-medium transition-colors border-l border-border ${
                     extraFilterMode === "region" ? "bg-primary text-primary-foreground" : "bg-muted/50 text-muted-foreground hover:bg-muted"
                   }`}
@@ -782,7 +942,17 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
                 </button>
               </div>
             </div>
-            <Collapsible open={extraCountriesOpen} onOpenChange={setExtraCountriesOpen}>
+            <div ref={extraCountriesRef} className="relative">
+            <Collapsible
+              open={extraCountriesOpen}
+              onOpenChange={(open) => {
+                setExtraCountriesOpen(open);
+                if (open) {
+                  setCountriesOpen(false);
+                  setVendorsOpen(false);
+                }
+              }}
+            >
               <CollapsibleTrigger asChild>
                 <Button
                   variant="outline"
@@ -803,16 +973,24 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
               </CollapsibleTrigger>
               <CollapsibleContent>
                 <div className="mt-2 rounded-lg border border-border bg-muted/30 p-3 max-h-48 overflow-y-auto space-y-2">
+                  <input
+                    type="text"
+                    placeholder="Search…"
+                    value={extraCountriesSearch}
+                    onChange={(e) => setExtraCountriesSearch(e.target.value)}
+                    onClick={(e) => e.stopPropagation()}
+                    className="w-full px-2 py-1.5 text-xs rounded border border-border bg-background mb-2"
+                  />
                   {extraFilterMode === "country" ? (
                     <>
                       <label className="flex items-center gap-2 text-sm cursor-pointer">
                         <Checkbox
-                          checked={extraCountries.size === allCountries.length && allCountries.length > 0}
+                          checked={filteredExtraCountries.length > 0 && filteredExtraCountries.every((c) => extraCountries.has(c))}
                           onCheckedChange={selectAllExtraCountries}
                         />
                         <span className="text-muted-foreground">All</span>
                       </label>
-                      {allCountries.map((c) => (
+                      {filteredExtraCountries.map((c) => (
                         <label key={c} className="flex items-center gap-2 text-sm cursor-pointer">
                           <Checkbox
                             checked={extraCountries.has(c)}
@@ -821,20 +999,20 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
                           {c}
                         </label>
                       ))}
-                      {allCountries.length === 0 && (
-                        <p className="text-xs text-muted-foreground">No country data.</p>
+                      {filteredExtraCountries.length === 0 && (
+                        <p className="text-xs text-muted-foreground">{extraCountriesSearch ? "No matches." : "No country data."}</p>
                       )}
                     </>
                   ) : (
                     <>
                       <label className="flex items-center gap-2 text-sm cursor-pointer">
                         <Checkbox
-                          checked={selectedExtraRegions.size === allRegions.length && allRegions.length > 0}
+                          checked={filteredExtraRegions.length > 0 && filteredExtraRegions.every((r) => selectedExtraRegions.has(r))}
                           onCheckedChange={selectAllExtraRegions}
                         />
                         <span className="text-muted-foreground">All</span>
                       </label>
-                      {allRegions.map((r) => (
+                      {filteredExtraRegions.map((r) => (
                         <label key={r} className="flex items-center gap-2 text-sm cursor-pointer">
                           <Checkbox
                             checked={selectedExtraRegions.has(r)}
@@ -843,14 +1021,15 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
                           {r}
                         </label>
                       ))}
-                      {allRegions.length === 0 && (
-                        <p className="text-xs text-muted-foreground">No regions.</p>
+                      {filteredExtraRegions.length === 0 && (
+                        <p className="text-xs text-muted-foreground">{extraCountriesSearch ? "No matches." : "No regions."}</p>
                       )}
                     </>
                   )}
                 </div>
               </CollapsibleContent>
             </Collapsible>
+            </div>
           </div>
 
           <div className="space-y-2">
@@ -861,7 +1040,8 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
                 inputMode="decimal"
                 placeholder="e.g. 0.005"
                 value={extraValueInput}
-                onChange={(e) => setExtraValueInput(e.target.value)}
+                onChange={handleExtraValueChange}
+                disabled={effectiveExtraCountries.size === 0}
                 className="flex-1 px-3 py-1.5 text-xs rounded-lg border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring font-mono"
               />
               <Button
@@ -869,6 +1049,8 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
                 variant="secondary"
                 size="sm"
                 onClick={handleApplyExtra}
+                disabled={effectiveExtraCountries.size === 0}
+                title={effectiveExtraCountries.size === 0 ? "Select at least one country or region first" : undefined}
               >
                 Apply
               </Button>
@@ -945,11 +1127,11 @@ export default function ComparacionCotizaciones({ onSaved }: ComparacionCotizaci
         </DialogContent>
       </Dialog>
 
-      {selectedVendorsList.length === 0 ? (
+      {selectedVendorsList.length === 0 || effectiveCountryFilter.size === 0 ? (
         <div className="flex flex-col items-center justify-center py-16 text-muted-foreground gap-2 rounded-2xl border border-border bg-card">
           <Building2 className="w-8 h-8 opacity-30" />
           <p className="text-sm">
-            Select at least one country and one vendor with data to see the comparison.
+            Select at least one country (or region), one vendor with data, and then you can see the comparison.
           </p>
         </div>
       ) : (
