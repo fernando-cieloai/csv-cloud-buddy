@@ -21,7 +21,8 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { supabase } from "@/integrations/supabase/client";
-import { RefreshCw, Eye, Pencil, Trash2, Plus } from "lucide-react";
+import { RefreshCw, Eye, Pencil, Trash2, Plus, Upload } from "lucide-react";
+import CsvUploader from "@/components/CsvUploader";
 
 type VendorStatus = "activado" | "desactivado";
 
@@ -41,6 +42,7 @@ const AjustesVendor = () => {
   const [selectedVendor, setSelectedVendor] = useState<Vendor | null>(null);
   const [mode, setMode] = useState<"crear" | "editar" | "ver">("crear");
   const [isDialogOpen, setIsDialogOpen] = useState(false);
+  const [uploadDialogVendor, setUploadDialogVendor] = useState<Vendor | null>(null);
   const [saving, setSaving] = useState(false);
 
   const [formNombre, setFormNombre] = useState("");
@@ -205,7 +207,7 @@ const AjustesVendor = () => {
             <form className="space-y-4" onSubmit={handleSubmit}>
               <div className="space-y-2">
                   <Label htmlFor="nombre">
-                      Name <span className="text-destructive">*</span>
+                      Vendor <span className="text-destructive">*</span>
                     </Label>
                 <Input
                   id="nombre"
@@ -280,9 +282,10 @@ const AjustesVendor = () => {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Name</TableHead>
+              <TableHead>Vendor</TableHead>
               <TableHead>Description</TableHead>
               <TableHead className="w-32">Status</TableHead>
+              <TableHead className="w-24 text-center">File</TableHead>
               <TableHead className="w-40 text-right">Actions</TableHead>
             </TableRow>
           </TableHeader>
@@ -290,7 +293,7 @@ const AjustesVendor = () => {
             {loading ? (
               <TableRow>
                 <TableCell
-                  colSpan={4}
+                  colSpan={5}
                   className="text-center py-12 text-sm text-muted-foreground"
                 >
                   <RefreshCw className="w-4 h-4 animate-spin inline-block mr-2" />
@@ -300,7 +303,7 @@ const AjustesVendor = () => {
             ) : vendors.length === 0 ? (
               <TableRow>
                 <TableCell
-                  colSpan={4}
+                  colSpan={5}
                   className="text-center text-sm text-muted-foreground py-8"
                 >
                   No vendors yet. Create the first one with the
@@ -335,6 +338,32 @@ const AjustesVendor = () => {
                         ? "Enabled"
                         : "Disabled"}
                     </Badge>
+                  </TableCell>
+                  <TableCell className="text-center">
+                    <Dialog open={uploadDialogVendor?.id === vendor.id} onOpenChange={(open) => !open && setUploadDialogVendor(null)}>
+                      <DialogTrigger asChild>
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          className="h-8 w-8"
+                          onClick={() => setUploadDialogVendor(vendor)}
+                          aria-label={`Upload file for ${vendor.nombre}`}
+                          disabled={vendor.estado === "desactivado"}
+                        >
+                          <Upload className="w-4 h-4" />
+                        </Button>
+                      </DialogTrigger>
+                      <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
+                        <DialogHeader>
+                          <DialogTitle>Upload rates for {vendor.nombre}</DialogTitle>
+                        </DialogHeader>
+                        <CsvUploader
+                          vendorId={vendor.id}
+                          compact
+                          onSuccess={() => setUploadDialogVendor(null)}
+                        />
+                      </DialogContent>
+                    </Dialog>
                   </TableCell>
                   <TableCell className="text-right space-x-2">
                     <Button

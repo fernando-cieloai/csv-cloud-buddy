@@ -177,7 +177,16 @@ interface Vendor {
   estado: string;
 }
 
-export default function CsvUploader() {
+interface CsvUploaderProps {
+  /** When set, file is uploaded for this vendor; vendor selector is hidden */
+  vendorId?: string;
+  /** Called after successful upload (e.g. to close dialog) */
+  onSuccess?: () => void;
+  /** Compact UI for use inside dialogs */
+  compact?: boolean;
+}
+
+export default function CsvUploader({ vendorId, onSuccess, compact = false }: CsvUploaderProps) {
   const [status, setStatus] = useState<UploadStatus>("idle");
   const [fileName, setFileName] = useState<string | null>(null);
   const [parsedData, setParsedData] = useState<PhoneRate[]>([]);
@@ -185,10 +194,15 @@ export default function CsvUploader() {
   const [uploadedCount, setUploadedCount] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const [vendors, setVendors] = useState<Vendor[]>([]);
-  const [selectedVendorId, setSelectedVendorId] = useState<string | null>(null);
+  const [selectedVendorId, setSelectedVendorId] = useState<string | null>(vendorId ?? null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
+    if (vendorId) setSelectedVendorId(vendorId);
+  }, [vendorId]);
+
+  useEffect(() => {
+    if (vendorId) return;
     let cancelled = false;
     const loadVendors = async () => {
       try {
@@ -203,7 +217,7 @@ export default function CsvUploader() {
     };
     loadVendors();
     return () => { cancelled = true; };
-  }, []);
+  }, [vendorId]);
 
   const resetState = () => {
     setStatus("idle");
@@ -274,6 +288,7 @@ export default function CsvUploader() {
     }
 
     setStatus("success");
+    onSuccess?.();
   };
 
   const handleFile = async (file: File) => {
@@ -350,35 +365,37 @@ export default function CsvUploader() {
         </AlertDialogContent>
       </AlertDialog>
 
-      <div className="w-full max-w-2xl mx-auto space-y-6">
-        {/* Vendor selector */}
-        <div className="space-y-2">
-          <div className="flex items-center gap-3">
-            <Label htmlFor="vendor-select" className="shrink-0">Vendor for this file</Label>
-            <Select
-              value={selectedVendorId ?? "__none__"}
-              onValueChange={(value) => setSelectedVendorId(value === "__none__" ? null : value)}
-            >
-              <SelectTrigger id="vendor-select" className="w-[200px]">
-                <SelectValue placeholder="Unassigned" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="__none__">Unassigned</SelectItem>
-                {vendors.map((v) => (
-                  <SelectItem key={v.id} value={v.id}>
-                    {v.nombre}
-                    {v.estado === "desactivado" && (
-                      <span className="ml-2 text-xs text-muted-foreground">(disabled)</span>
-                    )}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+      <div className={`w-full mx-auto space-y-6 ${compact ? "max-w-md" : "max-w-2xl"}`}>
+        {/* Vendor selector - hidden when vendorId is provided */}
+        {!vendorId && (
+          <div className="space-y-2">
+            <div className="flex items-center gap-3">
+              <Label htmlFor="vendor-select" className="shrink-0">Vendor for this file</Label>
+              <Select
+                value={selectedVendorId ?? "__none__"}
+                onValueChange={(value) => setSelectedVendorId(value === "__none__" ? null : value)}
+              >
+                <SelectTrigger id="vendor-select" className="w-[200px]">
+                  <SelectValue placeholder="Unassigned" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__none__">Unassigned</SelectItem>
+                  {vendors.map((v) => (
+                    <SelectItem key={v.id} value={v.id}>
+                      {v.nombre}
+                      {v.estado === "desactivado" && (
+                        <span className="ml-2 text-xs text-muted-foreground">(disabled)</span>
+                      )}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              The selected vendor will be assigned to the CSV or XLSX file you upload.
+            </p>
           </div>
-          <p className="text-xs text-muted-foreground">
-            The selected vendor will be assigned to the CSV or XLSX file you upload.
-          </p>
-        </div>
+        )}
 
         {/* Drop zone */}
         <div
@@ -399,7 +416,7 @@ export default function CsvUploader() {
             onChange={onFileChange}
           />
 
-          <div className="flex flex-col items-center gap-4 py-12 px-8 text-center">
+          <div className={`flex flex-col items-center gap-4 text-center ${compact ? "py-8 px-6" : "py-12 px-8"}`}>
             {status === "idle" && (
               <>
                 <div className="w-16 h-16 rounded-2xl bg-secondary flex items-center justify-center">

@@ -1,5 +1,6 @@
 import { Outlet } from "react-router-dom";
 import Navbar from "@/components/Navbar";
+import AppBreadcrumbs from "@/components/AppBreadcrumbs";
 import { PhoneCall } from "lucide-react";
 
 const MainLayout = () => {
@@ -23,6 +24,7 @@ const MainLayout = () => {
       </header>
 
       <main className="max-w-5xl mx-auto px-6 py-12">
+        <AppBreadcrumbs className="mb-6" />
         <Outlet />
       </main>
     </div>

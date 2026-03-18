@@ -28,10 +28,10 @@ const App = () => (
             <Route path="/quotations" element={<Cotizaciones />} />
             <Route path="/quotations/create" element={<CotizacionesCreate />} />
             <Route path="/quotations/:id/edit" element={<CotizacionesEdit />} />
-            <Route path="/settings/clients" element={<AjustesClients />} />
-            <Route path="/settings/vendor" element={<AjustesVendor />} />
+            <Route path="/vendors" element={<AjustesVendor />} />
+            <Route path="/clients" element={<AjustesClients />} />
+            <Route path="/countries" element={<AjustesPaises />} />
             <Route path="/settings/csv" element={<AjustesCsv />} />
-            <Route path="/settings/countries" element={<AjustesPaises />} />
           </Route>
           {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
           <Route path="*" element={<NotFound />} />

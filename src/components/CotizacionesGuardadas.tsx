@@ -47,6 +47,10 @@ interface SavedQuotation {
     vendors: { id: string; nombre: string }[];
     rateTypes?: string[];
     extra?: { countries: string[]; value: number };
+    marginFee?: { value: number; mode: "percentage" | "fixed" };
+    psfFee?: { value: number; mode: "percentage" | "fixed" };
+    displayRateTypes?: string[];
+    displayColumns?: { vendorId: string; rateType: string }[];
     rows: {
       country: string;
       type?: string;
@@ -174,38 +178,132 @@ export default function CotizacionesGuardadas() {
   const truncateForExcel = (s: string) =>
     s.length > EXCEL_CELL_MAX ? s.slice(0, EXCEL_CELL_MAX - 20) + "… (truncated)" : s;
 
+  const getBestVendorForRow = (
+    row: { byVendor: Record<string, CellByType | { prefixes?: string[]; rate?: number; ratePlusExtra?: number | null }> },
+    vendors: { id: string; nombre: string }[],
+    types: string[],
+    displayColumns?: { vendorId: string; rateType: string }[]
+  ) => {
+    const vendorById = Object.fromEntries(vendors.map((v) => [v.id, v]));
+    const candidates: { id: string; nombre: string; count: number; minRate: number }[] = [];
+    const vendorIdsToCheck = displayColumns
+      ? [...new Set(displayColumns.map((c) => c.vendorId))]
+      : vendors.map((v) => v.id);
+    for (const vid of vendorIdsToCheck) {
+      const v = vendorById[vid];
+      if (!v) continue;
+      const cell = row.byVendor?.[vid];
+      if (!cell) continue;
+      const hasMultiType = cell && ((cell as CellByType)["International"] !== undefined || (cell as CellByType)["mobile"] !== undefined);
+      const rateTypesToUse = displayColumns
+        ? displayColumns.filter((c) => c.vendorId === vid).map((c) => c.rateType)
+        : hasMultiType
+          ? types
+          : ["International"];
+      if (rateTypesToUse.length === 0) continue;
+      const rates = rateTypesToUse
+        .map((t) => (hasMultiType ? (cell as CellByType)[t]?.rate : (cell as { rate?: number }).rate))
+        .filter((r): r is number => r != null && r >= 0);
+      if (rates.length === 0) continue;
+      candidates.push({ id: v.id, nombre: v.nombre, count: rates.length, minRate: Math.min(...rates) });
+    }
+    if (candidates.length === 0) return null;
+    candidates.sort((a, b) => {
+      if (b.count !== a.count) return b.count - a.count;
+      return a.minRate - b.minRate;
+    });
+    return candidates[0];
+  };
+
   const handleExportXlsx = (q: SavedQuotation) => {
     const { vendors, rows, rateTypes } = q.snapshot;
     if (!vendors?.length || !rows?.length) return;
     const useNewFormat = isNewSnapshotFormat(q.snapshot);
+    const displayColumns = q.snapshot.displayColumns;
+    const displayTypes = displayColumns?.length
+      ? [...new Set(displayColumns.map((c) => c.rateType))]
+      : q.snapshot.displayRateTypes?.length
+        ? q.snapshot.displayRateTypes
+        : useNewFormat
+          ? (rateTypes ?? RATE_TYPES)
+          : ["rate"];
     const types = useNewFormat ? (rateTypes ?? RATE_TYPES) : ["rate"];
     const hasLineType = rows.some((r) => r.lineType != null);
+    const hasExtra = !!(q.snapshot.extra || q.snapshot.marginFee || q.snapshot.psfFee);
+    const useDisplayColumns = !!displayColumns?.length;
+    const useVendorTypeColumns = useDisplayColumns || !!q.snapshot.displayRateTypes?.length;
+    const vendorById = Object.fromEntries((vendors ?? []).map((v) => [v.id, v]));
 
     const headerRow = useNewFormat && hasLineType ? ["Country", "Type"] : useNewFormat ? ["Country"] : ["Country", "Type"];
-    for (const v of vendors) {
-      headerRow.push(`${v.nombre} - prefix`);
-      for (const t of types) headerRow.push(`${v.nombre} - ${t} rate`);
+    if (useDisplayColumns) {
+      for (const col of displayColumns!) {
+        const v = vendorById[col.vendorId];
+        headerRow.push(v ? `${v.nombre} - ${col.rateType}` : col.rateType);
+      }
+    } else if (useVendorTypeColumns) {
+      for (const v of vendors) {
+        for (const t of displayTypes) headerRow.push(`${v.nombre} - ${t}`);
+      }
+    } else {
+      for (const v of vendors) {
+        headerRow.push(`${v.nombre} - prefix`);
+        for (const t of types) headerRow.push(`${v.nombre} - ${t} rate`);
+      }
+    }
+    if (hasExtra && useNewFormat) {
+      headerRow.push("LCR Vendor");
+      for (const t of displayTypes) headerRow.push(`${t} + fees`);
     }
     const dataRows = rows.map((row) => {
       const typeCol = hasLineType ? (row.lineType ?? row.type ?? "") : (row.type ?? "");
       const r: (string | number)[] = useNewFormat && hasLineType ? [row.country, typeCol] : useNewFormat ? [row.country] : [row.country, typeCol];
+      if (useDisplayColumns) {
+        for (const col of displayColumns!) {
+          const cell = row.byVendor?.[col.vendorId] as CellByType | undefined;
+          const c = cell?.[col.rateType];
+          const val = c?.rate ?? "";
+          r.push(typeof val === "number" ? val : val);
+        }
+      } else {
       for (const v of vendors) {
         const cell = row.byVendor?.[v.id];
         const hasMultiType = cell && ((cell as CellByType)["International"] !== undefined || (cell as CellByType)["mobile"] !== undefined);
-        if (useNewFormat && hasMultiType) {
+        if (useVendorTypeColumns) {
+          for (const t of displayTypes) {
+            const c = hasMultiType && cell ? (cell as CellByType)[t] : cell ? { rate: (cell as { rate?: number }).rate } : undefined;
+            const val = c?.rate ?? "";
+            r.push(typeof val === "number" ? val : val);
+          }
+        } else if (useNewFormat && hasMultiType) {
           const byType = cell as CellByType;
           const allPrefixes = types.flatMap((t) => (byType[t]?.prefixes ?? []));
           r.push(truncateForExcel([...new Set(allPrefixes)].join(", ")));
           for (const t of types) {
             const c = (byType as CellByType)[t];
-            const val = c?.ratePlusExtra ?? c?.rate ?? "";
+            const val = c?.rate ?? "";
             r.push(typeof val === "number" ? val : val);
           }
         } else {
           const c = cell as { prefixes?: string[]; rate?: number; ratePlusExtra?: number | null } | undefined;
           const prefixStr = truncateForExcel(c?.prefixes?.join(", ") ?? "");
-          const rateVal = c?.ratePlusExtra != null ? c.ratePlusExtra : c?.rate ?? "";
+          const rateVal = c?.rate ?? "";
           r.push(prefixStr, typeof rateVal === "number" ? rateVal : rateVal);
+        }
+      }
+      }
+      if (hasExtra && useNewFormat) {
+        const best = getBestVendorForRow(row, vendors, displayTypes, displayColumns ?? undefined);
+        r.push(best?.nombre ?? "");
+        if (best) {
+          const cell = row.byVendor?.[best.id] as CellByType | undefined;
+          const hasMultiType = cell && (cell["International"] !== undefined || cell["mobile"] !== undefined);
+          for (const t of displayTypes) {
+            const c = hasMultiType && cell ? cell[t] : cell ? { rate: (cell as { rate?: number }).rate, ratePlusExtra: (cell as { ratePlusExtra?: number | null }).ratePlusExtra } : undefined;
+            const val = c?.ratePlusExtra ?? c?.rate ?? "";
+            r.push(typeof val === "number" ? val : val);
+          }
+        } else {
+          for (const _ of displayTypes) r.push("");
         }
       }
       return r;
@@ -280,7 +378,7 @@ export default function CotizacionesGuardadas() {
             <TableRow>
               <TableHead>Name</TableHead>
               <TableHead>Client</TableHead>
-              <TableHead>Vendors</TableHead>
+              <TableHead>Vendor</TableHead>
               <TableHead>Status</TableHead>
               <TableHead>Created</TableHead>
               <TableHead className="w-32 text-right">Actions</TableHead>
@@ -450,54 +548,126 @@ export default function CotizacionesGuardadas() {
               <table className="w-full text-sm border-collapse">
                 <thead className="sticky top-0 z-10 bg-muted">
                   <tr className="border-b border-border">
-                    <th className="text-left px-4 py-2 text-xs font-semibold">Country</th>
+                    <th
+                      rowSpan={viewingQuotation.snapshot.displayColumns?.length ? 2 : 1}
+                      className="text-left px-4 py-2 text-xs font-semibold"
+                    >
+                      Country
+                    </th>
                     {(!isNewSnapshotFormat(viewingQuotation.snapshot) || viewingQuotation.snapshot.rows.some((r) => r.lineType != null)) && (
-                      <th className="text-left px-4 py-2 text-xs font-semibold">Type</th>
+                      <th
+                        rowSpan={viewingQuotation.snapshot.displayColumns?.length ? 2 : 1}
+                        className="text-left px-4 py-2 text-xs font-semibold"
+                      >
+                        Type
+                      </th>
                     )}
-                    {viewingQuotation.snapshot.vendors.map((v) => {
-                      const useNew = isNewSnapshotFormat(viewingQuotation.snapshot);
-                      const types = useNew ? (viewingQuotation.snapshot.rateTypes ?? RATE_TYPES) : null;
-                      const colCount = useNew && types ? 1 + types.length : 3;
-                      return (
-                        <th key={v.id} colSpan={colCount} className="text-center px-4 py-2 text-xs font-semibold border-l border-border">
-                          {v.nombre}
-                        </th>
-                      );
-                    })}
+                    {viewingQuotation.snapshot.displayColumns?.length ? (
+                      (() => {
+                        const cols = viewingQuotation.snapshot.displayColumns!;
+                        const grouped = new Map<string, { vendor: { id: string; nombre: string }; rateTypes: string[] }>();
+                        for (const col of cols) {
+                          const v = viewingQuotation.snapshot.vendors.find((x) => x.id === col.vendorId);
+                          const existing = grouped.get(col.vendorId);
+                          if (existing) {
+                            if (!existing.rateTypes.includes(col.rateType)) existing.rateTypes.push(col.rateType);
+                          } else {
+                            grouped.set(col.vendorId, {
+                              vendor: v ?? { id: col.vendorId, nombre: col.vendorId },
+                              rateTypes: [col.rateType],
+                            });
+                          }
+                        }
+                        const groups = Array.from(grouped.values());
+                        return (
+                          <>
+                            {groups.map((g) => (
+                              <th
+                                key={g.vendor.id}
+                                colSpan={g.rateTypes.length}
+                                className="text-center px-4 py-2 text-xs font-semibold border-l border-border"
+                              >
+                                {g.vendor.nombre}
+                              </th>
+                            ))}
+                          </>
+                        );
+                      })()
+                    ) : viewingQuotation.snapshot.displayRateTypes?.length ? (
+                      viewingQuotation.snapshot.vendors.flatMap((v) =>
+                        viewingQuotation.snapshot.displayRateTypes!.map((t) => (
+                          <th key={`${v.id}-${t}`} className="text-left px-4 py-2 text-xs font-semibold border-l border-border">
+                            {v.nombre} - {t}
+                          </th>
+                        ))
+                      )
+                    ) : (
+                      viewingQuotation.snapshot.vendors.map((v) => {
+                        const useNew = isNewSnapshotFormat(viewingQuotation.snapshot);
+                        const types = useNew ? (viewingQuotation.snapshot.rateTypes ?? RATE_TYPES) : null;
+                        const colCount = useNew && types ? 1 + types.length : 3;
+                        return (
+                          <th key={v.id} colSpan={colCount} className="text-center px-4 py-2 text-xs font-semibold border-l border-border">
+                            {v.nombre}
+                          </th>
+                        );
+                      })
+                    )}
                   </tr>
-                  <tr className="border-b border-border">
-                    <th className="text-left px-4 py-1 text-[10px] font-normal text-muted-foreground"> </th>
-                    {(!isNewSnapshotFormat(viewingQuotation.snapshot) || viewingQuotation.snapshot.rows.some((r) => r.lineType != null)) && (
-                      <th className="text-left px-4 py-1 text-[10px] font-normal text-muted-foreground"> </th>
-                    )}
-                    {viewingQuotation.snapshot.vendors.flatMap((v) => {
-                      const useNew = isNewSnapshotFormat(viewingQuotation.snapshot);
-                      const types = useNew ? (viewingQuotation.snapshot.rateTypes ?? RATE_TYPES) : null;
-                      if (useNew && types) {
-                        return [
-                          <th key={`${v.id}-p`} className="text-left px-4 py-1 text-[10px] font-normal text-muted-foreground border-l border-border">
-                            prefix
-                          </th>,
-                          ...types.map((t) => (
-                            <th key={`${v.id}-${t}`} className="text-left px-4 py-1 text-[10px] font-normal text-muted-foreground">
+                  {viewingQuotation.snapshot.displayColumns?.length ? (
+                    <tr className="border-b border-border">
+                      {((): React.ReactNode => {
+                        const cols = viewingQuotation.snapshot.displayColumns!;
+                        const grouped = new Map<string, { vendor: { id: string; nombre: string }; rateTypes: string[] }>();
+                        for (const col of cols) {
+                          const v = viewingQuotation.snapshot.vendors.find((x) => x.id === col.vendorId);
+                          const existing = grouped.get(col.vendorId);
+                          if (existing) {
+                            if (!existing.rateTypes.includes(col.rateType)) existing.rateTypes.push(col.rateType);
+                          } else {
+                            grouped.set(col.vendorId, {
+                              vendor: v ?? { id: col.vendorId, nombre: col.vendorId },
+                              rateTypes: [col.rateType],
+                            });
+                          }
+                        }
+                        return Array.from(grouped.values()).flatMap((g) =>
+                          g.rateTypes.map((t) => (
+                            <th
+                              key={`${g.vendor.id}-${t}`}
+                              className="text-left px-4 py-1 text-[10px] font-normal text-muted-foreground border-l border-border"
+                            >
                               {t}
                             </th>
-                          )),
+                          ))
+                        );
+                      })()}
+                    </tr>
+                  ) : !viewingQuotation.snapshot.displayRateTypes?.length && (
+                    <tr className="border-b border-border">
+                      <th className="text-left px-4 py-1 text-[10px] font-normal text-muted-foreground"> </th>
+                      {(!isNewSnapshotFormat(viewingQuotation.snapshot) || viewingQuotation.snapshot.rows.some((r) => r.lineType != null)) && (
+                        <th className="text-left px-4 py-1 text-[10px] font-normal text-muted-foreground"> </th>
+                      )}
+                      {viewingQuotation.snapshot.vendors.flatMap((v) => {
+                        const useNew = isNewSnapshotFormat(viewingQuotation.snapshot);
+                        const types = useNew ? (viewingQuotation.snapshot.rateTypes ?? RATE_TYPES) : null;
+                        if (useNew && types) {
+                          return [
+                            <th key={`${v.id}-p`} className="text-left px-4 py-1 text-[10px] font-normal text-muted-foreground border-l border-border">prefix</th>,
+                            ...types.map((t) => (
+                              <th key={`${v.id}-${t}`} className="text-left px-4 py-1 text-[10px] font-normal text-muted-foreground">{t}</th>
+                            )),
+                          ];
+                        }
+                        return [
+                          <th key={`${v.id}-p`} className="text-left px-4 py-1 text-[10px] font-normal text-muted-foreground border-l border-border">prefix</th>,
+                          <th key={`${v.id}-r`} className="text-left px-4 py-1 text-[10px] font-normal text-muted-foreground">rate</th>,
+                          <th key={`${v.id}-e`} className="text-left px-4 py-1 text-[10px] font-normal text-muted-foreground">rate+extra</th>,
                         ];
-                      }
-                      return [
-                        <th key={`${v.id}-p`} className="text-left px-4 py-1 text-[10px] font-normal text-muted-foreground border-l border-border">
-                          prefix
-                        </th>,
-                        <th key={`${v.id}-r`} className="text-left px-4 py-1 text-[10px] font-normal text-muted-foreground">
-                          rate
-                        </th>,
-                        <th key={`${v.id}-e`} className="text-left px-4 py-1 text-[10px] font-normal text-muted-foreground">
-                          rate+extra
-                        </th>,
-                      ];
-                    })}
-                  </tr>
+                      })}
+                    </tr>
+                  )}
                 </thead>
                 <tbody>
                   {viewingQuotation.snapshot.rows.map((row, idx) => (
@@ -506,7 +676,32 @@ export default function CotizacionesGuardadas() {
                       {(!isNewSnapshotFormat(viewingQuotation.snapshot) || viewingQuotation.snapshot.rows.some((r) => r.lineType != null)) && (
                         <td className="px-4 py-2">{row.lineType ?? row.type ?? "—"}</td>
                       )}
-                      {viewingQuotation.snapshot.vendors.map((v) => {
+                      {viewingQuotation.snapshot.displayColumns?.length ? (
+                        viewingQuotation.snapshot.displayColumns!.map((col) => {
+                          const cell = row.byVendor[col.vendorId] as CellByType | undefined;
+                          const c = cell?.[col.rateType];
+                          const display = c?.rate ?? "";
+                          return (
+                            <td key={`${col.vendorId}-${col.rateType}`} className="px-4 py-2 border-l border-border font-mono text-xs">
+                              {typeof display === "number" ? display.toFixed(4) : "—"}
+                            </td>
+                          );
+                        })
+                      ) : viewingQuotation.snapshot.displayRateTypes?.length ? (
+                        viewingQuotation.snapshot.vendors.flatMap((v) => {
+                          const cell = row.byVendor[v.id] as CellByType | undefined;
+                          return viewingQuotation.snapshot.displayRateTypes!.map((t) => {
+                            const c = cell?.[t];
+                            const display = c?.rate ?? "";
+                            return (
+                              <td key={`${v.id}-${t}`} className="px-4 py-2 border-l border-border font-mono text-xs">
+                                {typeof display === "number" ? display.toFixed(4) : "—"}
+                              </td>
+                            );
+                          });
+                        })
+                      ) : (
+                        viewingQuotation.snapshot.vendors.map((v) => {
                         const cell = row.byVendor[v.id];
                         const useNew = isNewSnapshotFormat(viewingQuotation.snapshot) && cell && ((cell as CellByType)["International"] !== undefined || (cell as CellByType)["mobile"] !== undefined);
                         if (useNew && cell) {
@@ -593,7 +788,8 @@ export default function CotizacionesGuardadas() {
                             </td>
                           </React.Fragment>
                         );
-                      })}
+                      })
+                      )}
                     </tr>
                   ))}
                 </tbody>

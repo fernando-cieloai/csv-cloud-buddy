@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useMemo, useRef, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
-import { RefreshCw, Search, ChevronDown, ChevronLeft, ChevronRight, Building2, Save, FileDown } from "lucide-react";
+import { RefreshCw, Search, ChevronDown, ChevronLeft, ChevronRight, Building2, Save, FileDown, DollarSign } from "lucide-react";
 import * as XLSX from "xlsx";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -117,6 +117,10 @@ interface SavedQuotation {
     vendors: { id: string; nombre: string }[];
     rateTypes?: string[];
     extra?: { countries: string[]; value: number };
+    marginFee?: { value: number; mode: "percentage" | "fixed" };
+    psfFee?: { value: number; mode: "percentage" | "fixed" };
+    displayRateTypes?: string[];
+    displayColumns?: { vendorId: string; rateType: string }[];
     rows: SavedQuotationRow[];
   };
 }
@@ -130,20 +134,19 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [selectedCountries, setSelectedCountries] = useState<Set<string>>(new Set());
-  const [selectedVendorIds, setSelectedVendorIds] = useState<Set<string>>(new Set());
+  const [selectedColumnPairs, setSelectedColumnPairs] = useState<Set<string>>(new Set());
+  const [columnsOpen, setColumnsOpen] = useState(false);
   const [countriesOpen, setCountriesOpen] = useState(false);
-  const [vendorsOpen, setVendorsOpen] = useState(false);
-  const [extraCountriesOpen, setExtraCountriesOpen] = useState(false);
-  const [extraCountries, setExtraCountries] = useState<Set<string>>(new Set());
-  const [extraValueInput, setExtraValueInput] = useState("");
-  const [appliedExtra, setAppliedExtra] = useState<{ countries: Set<string>; value: number } | null>(null);
+  const [marginFeeInput, setMarginFeeInput] = useState("");
+  const [marginFeeMode, setMarginFeeMode] = useState<"percentage" | "fixed">("percentage");
+  const [psfFeeInput, setPsfFeeInput] = useState("");
+  const [psfFeeMode, setPsfFeeMode] = useState<"percentage" | "fixed">("percentage");
+  const [appliedFees, setAppliedFees] = useState<{
+    marginFee: { value: number; mode: "percentage" | "fixed" } | null;
+    psfFee: { value: number; mode: "percentage" | "fixed" } | null;
+  } | null>(null);
   const [countriesFromDb, setCountriesFromDb] = useState<{ id: string; nombre: string; region_id: string | null }[]>([]);
   const [countriesFromRates, setCountriesFromRates] = useState<string[]>([]);
-  const [regionsFromDb, setRegionsFromDb] = useState<{ id: string; nombre: string }[]>([]);
-  const [filterMode, setFilterMode] = useState<"country" | "region">("country");
-  const [selectedRegions, setSelectedRegions] = useState<Set<string>>(new Set());
-  const [extraFilterMode, setExtraFilterMode] = useState<"country" | "region">("country");
-  const [selectedExtraRegions, setSelectedExtraRegions] = useState<Set<string>>(new Set());
   const [saveDialogOpen, setSaveDialogOpen] = useState(false);
   const [saveName, setSaveName] = useState("");
   const [saveClientId, setSaveClientId] = useState<string>("__none__");
@@ -155,23 +158,20 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
   const [ratesLoading, setRatesLoading] = useState(false);
   const [exportingOrSaving, setExportingOrSaving] = useState(false);
   const [countriesSearch, setCountriesSearch] = useState("");
-  const [vendorsSearch, setVendorsSearch] = useState("");
-  const [extraCountriesSearch, setExtraCountriesSearch] = useState("");
-  const [selectedBestVendorPerRow, setSelectedBestVendorPerRow] = useState<Record<string, string>>({});
+  const [columnsSearch, setColumnsSearch] = useState("");
+  const [selectedColumnKeyPerRow, setSelectedColumnKeyPerRow] = useState<Record<string, string>>({});
+  const [hasApplied, setHasApplied] = useState(false);
 
   const countriesRef = useRef<HTMLDivElement>(null);
-  const vendorsRef = useRef<HTMLDivElement>(null);
-  const extraCountriesRef = useRef<HTMLDivElement>(null);
+  const columnsRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       const target = e.target as Node;
       if (countriesRef.current?.contains(target)) return;
-      if (vendorsRef.current?.contains(target)) return;
-      if (extraCountriesRef.current?.contains(target)) return;
+      if (columnsRef.current?.contains(target)) return;
       setCountriesOpen(false);
-      setVendorsOpen(false);
-      setExtraCountriesOpen(false);
+      setColumnsOpen(false);
     };
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
@@ -181,7 +181,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
     setLoading(true);
     setError(null);
     try {
-      const [vendorsRes, uploadsRes, countriesRes, regionsRes, clientsRes] = await Promise.all([
+      const [vendorsRes, uploadsRes, countriesRes, clientsRes] = await Promise.all([
         supabase.from("vendors").select("id, nombre").order("nombre"),
         supabase
           .from("csv_uploads")
@@ -189,14 +189,12 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
           .not("vendor_id", "is", null)
           .order("created_at", { ascending: false }),
         supabase.from("countries").select("id, nombre, region_id").order("nombre"),
-        supabase.from("regions").select("id, nombre").order("nombre"),
         supabase.from("clients").select("id, name").order("name"),
       ]);
 
       if (vendorsRes.error) throw new Error(vendorsRes.error.message);
       if (uploadsRes.error) throw new Error(uploadsRes.error.message);
       if (countriesRes.error) throw new Error(countriesRes.error.message);
-      if (regionsRes.error) throw new Error(regionsRes.error.message);
       if (clientsRes.error) throw new Error(clientsRes.error.message);
 
       setVendors(vendorsRes.data ?? []);
@@ -204,7 +202,6 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
       setClients((clientsRes.data ?? []) as { id: string; name: string }[]);
       setRates([]);
       setCountriesFromDb(countriesRes.data ?? []);
-      setRegionsFromDb(regionsRes.data ?? []);
       setTotalCountries(0);
       setPage(1);
     } catch (err) {
@@ -234,78 +231,85 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
     return Array.from(fromDb).sort((a, b) => a.localeCompare(b));
   }, [countriesFromDb, countriesFromRates]);
 
-  const allRegions = useMemo(
-    () => regionsFromDb.map((r) => r.nombre),
-    [regionsFromDb]
-  );
-
   const filteredCountries = useMemo(() => {
     const q = countriesSearch.trim().toLowerCase();
     if (!q) return allCountries;
     return allCountries.filter((c) => c.toLowerCase().includes(q));
   }, [allCountries, countriesSearch]);
 
-  const filteredRegions = useMemo(() => {
-    const q = countriesSearch.trim().toLowerCase();
-    if (!q) return allRegions;
-    return allRegions.filter((r) => r.toLowerCase().includes(q));
-  }, [allRegions, countriesSearch]);
+  const columnOptions = useMemo(
+    () =>
+      vendorsWithUploads.flatMap((v) =>
+        RATE_TYPES.map((t) => ({ vendor: v, rateType: t, key: `${v.id}\t${t}` }))
+      ),
+    [vendorsWithUploads]
+  );
 
-  const filteredVendors = useMemo(() => {
-    const q = vendorsSearch.trim().toLowerCase();
-    if (!q) return vendorsWithUploads;
-    return vendorsWithUploads.filter((v) => v.nombre.toLowerCase().includes(q));
-  }, [vendorsWithUploads, vendorsSearch]);
+  const filteredColumnOptions = useMemo(() => {
+    const q = columnsSearch.trim().toLowerCase();
+    if (!q) return columnOptions;
+    return columnOptions.filter(
+      (opt) =>
+        opt.vendor.nombre.toLowerCase().includes(q) ||
+        opt.rateType.toLowerCase().includes(q)
+    );
+  }, [columnOptions, columnsSearch]);
 
-  const filteredExtraCountries = useMemo(() => {
-    const q = extraCountriesSearch.trim().toLowerCase();
-    if (!q) return allCountries;
-    return allCountries.filter((c) => c.toLowerCase().includes(q));
-  }, [allCountries, extraCountriesSearch]);
+  const selectedColumnsList = useMemo(
+    () =>
+      columnOptions
+        .filter((opt) => selectedColumnPairs.has(opt.key))
+        .map((opt) => ({ vendor: opt.vendor, rateType: opt.rateType })),
+    [columnOptions, selectedColumnPairs]
+  );
 
-  const filteredExtraRegions = useMemo(() => {
-    const q = extraCountriesSearch.trim().toLowerCase();
-    if (!q) return allRegions;
-    return allRegions.filter((r) => r.toLowerCase().includes(q));
-  }, [allRegions, extraCountriesSearch]);
-
-  const regionToCountryNames = useMemo(() => {
-    const m = new Map<string, string[]>();
-    for (const r of regionsFromDb) m.set(r.nombre, []);
-    for (const c of countriesFromDb) {
-      if (c.region_id) {
-        const region = regionsFromDb.find((x) => x.id === c.region_id);
-        if (region) {
-          const list = m.get(region.nombre) ?? [];
-          list.push(c.nombre);
-          m.set(region.nombre, list);
-        }
+  const columnsGroupedByVendor = useMemo(() => {
+    const map = new Map<string, { vendor: Vendor; rateTypes: string[] }>();
+    for (const col of selectedColumnsList) {
+      const existing = map.get(col.vendor.id);
+      if (existing) {
+        if (!existing.rateTypes.includes(col.rateType)) existing.rateTypes.push(col.rateType);
+      } else {
+        map.set(col.vendor.id, { vendor: col.vendor, rateTypes: [col.rateType] });
       }
     }
-    return m;
-  }, [countriesFromDb, regionsFromDb]);
+    return Array.from(map.values());
+  }, [selectedColumnsList]);
 
-  const effectiveCountryFilter = useMemo(() => {
-    if (filterMode === "country") {
-      return selectedCountries;
+  const effectiveCountryFilter = useMemo(() => selectedCountries, [selectedCountries]);
+
+  const applyFeesToRate = (rate: number): number => {
+    if (!appliedFees) return rate;
+    let r = rate;
+    const m = appliedFees.marginFee;
+    const p = appliedFees.psfFee;
+    if (m && m.value !== 0) {
+      r = m.mode === "percentage" ? r * (1 + m.value / 100) : r + m.value;
     }
-    if (selectedRegions.size === 0) return new Set<string>();
-    const names = new Set<string>();
-    for (const r of selectedRegions) {
-      for (const c of regionToCountryNames.get(r) ?? []) names.add(c);
+    if (p && p.value !== 0) {
+      r = p.mode === "percentage" ? r * (1 + p.value / 100) : r + p.value;
     }
-    return names;
-  }, [filterMode, selectedCountries, selectedRegions, regionToCountryNames]);
+    return r;
+  };
+
+  const selectedVendorIdsForFetch = useMemo(() => {
+    const ids = new Set<string>();
+    for (const key of selectedColumnPairs) {
+      const [vendorId] = key.split("\t");
+      if (vendorId) ids.add(vendorId);
+    }
+    return ids;
+  }, [selectedColumnPairs]);
 
   const getUploadIdsForRates = useMemo(() => {
     const vendorList =
-      selectedVendorIds.size > 0
-        ? vendorsWithUploads.filter((v) => selectedVendorIds.has(v.id))
+      selectedVendorIdsForFetch.size > 0
+        ? vendorsWithUploads.filter((v) => selectedVendorIdsForFetch.has(v.id))
         : vendorsWithUploads;
     return uploads
       .filter((u) => u.vendor_id && vendorList.some((v) => v.id === u.vendor_id))
       .map((u) => u.id);
-  }, [uploads, selectedVendorIds, vendorsWithUploads]);
+  }, [uploads, selectedVendorIdsForFetch, vendorsWithUploads]);
 
   const fetchRates = React.useCallback(async () => {
     const uploadIds = getUploadIdsForRates;
@@ -385,34 +389,50 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
       const snap = q.snapshot;
       setSaveName(q.name ?? "");
       setSaveClientId(q.client_id ?? "__none__");
-      setSelectedVendorIds(new Set((snap.vendors ?? []).map((v) => v.id)));
       const uniqueCountries = [...new Set((snap.rows ?? []).map((r) => r.country))];
       setSelectedCountries(new Set(uniqueCountries));
-      setFilterMode("country");
-      setSelectedRegions(new Set());
-      if (snap.extra) {
-        setExtraCountries(new Set(snap.extra.countries));
-        setExtraValueInput(String(snap.extra.value));
-        setAppliedExtra({ countries: new Set(snap.extra.countries), value: snap.extra.value });
-        setExtraFilterMode("country");
-        setSelectedExtraRegions(new Set());
+      if (snap.marginFee) {
+        setMarginFeeInput(String(snap.marginFee.value));
+        setMarginFeeMode(snap.marginFee.mode);
+      }
+      if (snap.psfFee) {
+        setPsfFeeInput(String(snap.psfFee.value));
+        setPsfFeeMode(snap.psfFee.mode);
+      }
+      if (snap.marginFee || snap.psfFee) {
+        setAppliedFees({
+          marginFee: snap.marginFee ?? null,
+          psfFee: snap.psfFee ?? null,
+        });
+      }
+      if (snap.displayColumns?.length) {
+        setSelectedColumnPairs(new Set(snap.displayColumns.map((c: { vendorId: string; rateType: string }) => `${c.vendorId}\t${c.rateType}`)));
+      } else {
+        const legacyVendors = snap.vendors ?? [];
+        const legacyTypes = (snap.displayRateTypes ?? snap.rateTypes ?? RATE_TYPES) as readonly string[];
+        if (legacyVendors.length > 0 && legacyTypes.length > 0) {
+          setSelectedColumnPairs(
+            new Set(legacyVendors.flatMap((v: { id: string }) => legacyTypes.map((t) => `${v.id}\t${t}`)))
+          );
+        }
       }
       setTotalCountries((snap.rows ?? []).length);
       setCountriesFromRates(uniqueCountries);
+      setHasApplied(true);
     })();
     return () => { cancelled = true; };
   }, [editQuotationId]);
 
   useEffect(() => {
     setPage(1);
-  }, [effectiveCountryFilter, search, selectedVendorIds]);
+  }, [effectiveCountryFilter, search, selectedColumnPairs]);
 
   useEffect(() => {
-    if (editQuotationId) return;
+    if (editQuotationId || !hasApplied) return;
     if (!loading && uploads.length > 0) {
       fetchRates();
     }
-  }, [loading, uploads.length, fetchRates, editQuotationId]);
+  }, [loading, uploads.length, fetchRates, editQuotationId, hasApplied]);
 
   useEffect(() => {
     const loadCountriesFromRates = async () => {
@@ -429,16 +449,6 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
     if (!loading && !editQuotationId) loadCountriesFromRates();
   }, [loading, getUploadIdsForRates, editQuotationId]);
 
-  const effectiveExtraCountries = useMemo(() => {
-    if (extraFilterMode === "country") return extraCountries;
-    if (selectedExtraRegions.size === 0) return new Set<string>();
-    const names = new Set<string>();
-    for (const r of selectedExtraRegions) {
-      for (const c of regionToCountryNames.get(r) ?? []) names.add(c);
-    }
-    return names;
-  }, [extraFilterMode, extraCountries, selectedExtraRegions, regionToCountryNames]);
-
   const toggleCountry = (country: string) => {
     setSelectedCountries((prev) => {
       const next = new Set(prev);
@@ -448,13 +458,27 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
     });
   };
 
-  const toggleVendor = (vendorId: string) => {
-    setSelectedVendorIds((prev) => {
+  const toggleColumnPair = (key: string) => {
+    setSelectedColumnPairs((prev) => {
       const next = new Set(prev);
-      if (next.has(vendorId)) next.delete(vendorId);
-      else next.add(vendorId);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
       return next;
     });
+  };
+
+  const selectAllColumns = () => {
+    const list = filteredColumnOptions;
+    const allSelected = list.length > 0 && list.every((opt) => selectedColumnPairs.has(opt.key));
+    if (allSelected) {
+      setSelectedColumnPairs((prev) => {
+        const next = new Set(prev);
+        for (const opt of list) next.delete(opt.key);
+        return next;
+      });
+    } else {
+      setSelectedColumnPairs((prev) => new Set([...prev, ...list.map((opt) => opt.key)]));
+    }
   };
 
   const selectAllCountries = () => {
@@ -471,112 +495,34 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
     }
   };
 
-  const toggleRegion = (region: string) => {
-    setSelectedRegions((prev) => {
-      const next = new Set(prev);
-      if (next.has(region)) next.delete(region);
-      else next.add(region);
-      return next;
-    });
-  };
-
-  const selectAllRegions = () => {
-    const list = filteredRegions;
-    const allSelected = list.length > 0 && list.every((r) => selectedRegions.has(r));
-    if (allSelected) {
-      setSelectedRegions((prev) => {
-        const next = new Set(prev);
-        for (const r of list) next.delete(r);
-        return next;
-      });
-    } else {
-      setSelectedRegions((prev) => new Set([...prev, ...list]));
-    }
-  };
-
-  const toggleExtraRegion = (region: string) => {
-    setSelectedExtraRegions((prev) => {
-      const next = new Set(prev);
-      if (next.has(region)) next.delete(region);
-      else next.add(region);
-      return next;
-    });
-  };
-
-  const selectAllExtraRegions = () => {
-    const list = filteredExtraRegions;
-    const allSelected = list.length > 0 && list.every((r) => selectedExtraRegions.has(r));
-    if (allSelected) {
-      setSelectedExtraRegions((prev) => {
-        const next = new Set(prev);
-        for (const r of list) next.delete(r);
-        return next;
-      });
-    } else {
-      setSelectedExtraRegions((prev) => new Set([...prev, ...list]));
-    }
-  };
-
-  const selectAllVendors = () => {
-    const list = filteredVendors;
-    const allSelected = list.length > 0 && list.every((v) => selectedVendorIds.has(v.id));
-    if (allSelected) {
-      setSelectedVendorIds((prev) => {
-        const next = new Set(prev);
-        for (const v of list) next.delete(v.id);
-        return next;
-      });
-    } else {
-      setSelectedVendorIds((prev) => new Set([...prev, ...list.map((v) => v.id)]));
-    }
-  };
-
-  const toggleExtraCountry = (country: string) => {
-    setExtraCountries((prev) => {
-      const next = new Set(prev);
-      if (next.has(country)) next.delete(country);
-      else next.add(country);
-      return next;
-    });
-  };
-
-  const selectAllExtraCountries = () => {
-    const list = extraFilterMode === "country" ? filteredExtraCountries : filteredExtraRegions.flatMap((r) => regionToCountryNames.get(r) ?? []);
-    const allSelected = list.length > 0 && list.every((c) => extraCountries.has(c));
-    if (allSelected) {
-      setExtraCountries((prev) => {
-        const next = new Set(prev);
-        for (const c of list) next.delete(c);
-        return next;
-      });
-    } else {
-      setExtraCountries((prev) => new Set([...prev, ...list]));
-    }
-  };
-
-  const handleApplyExtra = () => {
-    if (effectiveExtraCountries.size === 0) {
-      toast.error("Select at least one country or region first");
+  const handleApply = () => {
+    const marginVal = parseFloat(marginFeeInput.replace(",", "."));
+    const psfVal = parseFloat(psfFeeInput.replace(",", "."));
+    const hasMargin = !Number.isNaN(marginVal) && marginVal !== 0;
+    const hasPsf = !Number.isNaN(psfVal) && psfVal !== 0;
+    if (!hasMargin) {
+      toast.error("Margin fee is required");
       return;
     }
-    const val = parseFloat(extraValueInput.replace(",", "."));
-    if (Number.isNaN(val)) {
-      setAppliedExtra(null);
+    if (selectedColumnPairs.size === 0 || selectedCountries.size === 0) {
+      toast.error("Select at least one country and one vendor-rate comparison");
       return;
     }
-    setAppliedExtra({ countries: new Set(effectiveExtraCountries), value: val });
+    setAppliedFees({
+      marginFee: hasMargin ? { value: marginVal, mode: marginFeeMode } : null,
+      psfFee: hasPsf ? { value: psfVal, mode: psfFeeMode } : null,
+    });
+    setHasApplied(true);
+    setPage(1);
   };
 
-  const handleExtraValueChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFeeInputChange = (
+    setter: React.Dispatch<React.SetStateAction<string>>,
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
     const v = e.target.value;
-    if (v === "" || /^-?\d*\.?\d*$/.test(v)) setExtraValueInput(v);
+    if (v === "" || /^-?\d*\.?\d*$/.test(v)) setter(v);
   };
-
-  const countryInExtra = (country: string) =>
-    appliedExtra &&
-    [...appliedExtra.countries].some(
-      (c) => c.trim().toLowerCase() === country?.trim().toLowerCase()
-    );
 
   const buildTableRowsFromAggregated = (
     r: AggregatedRateRow[],
@@ -618,6 +564,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
   interface VendorCellByType {
     prefixes: string[];
     rate: number;
+    ratePlusExtra?: number | null;
   }
 
   const buildTableRowsFromSnapshot = (
@@ -637,17 +584,18 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
         const byType: Partial<Record<RateType, VendorCellByType>> = {};
         if (hasMulti && typeof cell === "object") {
           for (const t of rateTypes) {
-            const c = (cell as Record<string, { prefixes?: string[]; rate?: number }>)[t];
+            const c = (cell as Record<string, { prefixes?: string[]; rate?: number; ratePlusExtra?: number | null }>)[t];
             if (c) {
               const rt = getRateType(t);
-              byType[rt] = { prefixes: c.prefixes ?? [], rate: c.rate ?? 0 };
+              byType[rt] = { prefixes: c.prefixes ?? [], rate: c.rate ?? 0, ratePlusExtra: c.ratePlusExtra ?? undefined };
             }
           }
         } else {
-          const leg = cell as { prefixes?: string[]; rate?: number };
+          const leg = cell as { prefixes?: string[]; rate?: number; ratePlusExtra?: number | null };
           byType["International" as RateType] = {
             prefixes: leg?.prefixes ?? [],
             rate: leg?.rate ?? 0,
+            ratePlusExtra: leg?.ratePlusExtra ?? undefined,
           };
         }
         if (Object.keys(byType).length > 0) byVendor.set(vendorId, byType);
@@ -666,9 +614,9 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
     }
     const uploadIds = getUploadIdsForRates;
     if (uploadIds.length === 0) return [];
-    const vendorList =
-      selectedVendorIds.size > 0
-        ? vendorsWithUploads.filter((v) => selectedVendorIds.has(v.id))
+      const vendorList =
+      selectedVendorIdsForFetch.size > 0
+        ? vendorsWithUploads.filter((v) => selectedVendorIdsForFetch.has(v.id))
         : vendorsWithUploads;
     const countryFilterArr =
       effectiveCountryFilter.size > 0 ? Array.from(effectiveCountryFilter) : null;
@@ -694,7 +642,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
   };
 
   const handleExportXlsx = async () => {
-    if (selectedVendorsList.length === 0 || totalCountries === 0) return;
+    if (selectedColumnsList.length === 0 || totalCountries === 0) return;
     setExportingOrSaving(true);
     toast.info("Preparing export…");
     try {
@@ -703,31 +651,44 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
         toast.error("No data to export");
         return;
       }
-      const headerRow = ["Country", "Type"];
-      for (const v of selectedVendorsList) {
-        headerRow.push(`${v.nombre} - prefix`);
-        for (const t of RATE_TYPES) headerRow.push(`${v.nombre} - ${t} rate`);
-      }
-      const EXCEL_CELL_MAX = 32767;
-      const truncateForExcel = (s: string) =>
-        s.length > EXCEL_CELL_MAX ? s.slice(0, EXCEL_CELL_MAX - 20) + "… (truncated)" : s;
+      const headerRow = [
+        "Country",
+        "Type",
+        ...selectedColumnsList.map((c) => `${c.vendor.nombre} - ${c.rateType}`),
+        "LCR Vendor",
+        "LCR Rate",
+        "Vendor Selected",
+        "Vendor Selected Rate",
+        "Margin",
+        "PSF",
+        "Total",
+      ];
 
       const dataRows = rowsToExport.map((row) => {
+        const rowKey = getRowKey(row);
+        const { vendorId: bestVendorId, rateType: bestRateType, rate: bestRate, vendorName: bestVendorName } = getBestVendorAndRateForRow(row);
+        const bestVendorLabel = bestVendorName && bestRateType ? `${bestVendorName} - ${bestRateType}` : "";
+        const bestKey = bestVendorId && bestRateType ? `${bestVendorId}\t${bestRateType}` : "";
+        const selectedKey = selectedColumnKeyPerRow[rowKey] ?? bestKey ?? "";
+        const selectedCol = selectedColumnsList.find((c) => `${c.vendor.id}\t${c.rateType}` === selectedKey);
+        const selectedLabel = selectedCol ? `${selectedCol.vendor.nombre} - ${selectedCol.rateType}` : "";
+        const selectedRate = selectedKey ? getRateForColumnKey(row, selectedKey) : null;
+        const marginAmount = selectedRate != null ? getMarginAmount(selectedRate) : null;
+        const psfAmount = selectedRate != null ? getPsfAmount(selectedRate) : null;
+        const total =
+          selectedRate != null && marginAmount != null && psfAmount != null
+            ? selectedRate + marginAmount + psfAmount
+            : null;
         const r: (string | number)[] = [row.country, row.lineType];
-        for (const v of selectedVendorsList) {
-          const byType = row.byVendor.get(v.id);
-          const allPrefixes = RATE_TYPES.flatMap((t) => byType?.[t]?.prefixes ?? []);
-          r.push(truncateForExcel([...new Set(allPrefixes)].join(", ")));
-          for (const t of RATE_TYPES) {
-            const cell = byType?.[t];
-            const rate = cell?.rate;
-            const val =
-              rate != null && countryInExtra(row.country)
-                ? rate + (appliedExtra?.value ?? 0)
-                : rate ?? "";
-            r.push(typeof val === "number" ? val : val);
-          }
+        for (const col of selectedColumnsList) {
+          const vByType = row.byVendor.get(col.vendor.id);
+          const cell = vByType?.[col.rateType];
+          const rate = cell?.rate;
+          r.push(rate != null ? rate : "");
         }
+        r.push(bestVendorLabel || "", bestRate ?? "");
+        r.push(selectedLabel || "", selectedRate ?? "");
+        r.push(marginAmount ?? "", psfAmount ?? "", total ?? "");
         return r;
       });
       const ws = XLSX.utils.aoa_to_sheet([headerRow, ...dataRows]);
@@ -743,16 +704,14 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
   };
 
   const handleSaveQuotation = async () => {
-    if (selectedVendorsList.length === 0 || totalCountries === 0) return;
+    if (selectedColumnsList.length === 0 || totalCountries === 0) return;
     setSaving(true);
     setExportingOrSaving(true);
     toast.info("Preparing save…");
     try {
       if (editQuotationId && editQuotation) {
         const snap = editQuotation.snapshot;
-        const extraCountriesSet = appliedExtra ? new Set(appliedExtra.countries) : new Set<string>();
         const rows = (snap.rows ?? []).map((row) => {
-          const inExtra = appliedExtra && extraCountriesSet.has(row.country);
           const rateTypes = (snap.rateTypes ?? RATE_TYPES) as readonly string[];
           const byVendor: Record<string, Record<string, { prefixes: string[]; rate: number; ratePlusExtra: number | null }>> = {};
           for (const [vendorId, vendorCells] of Object.entries(row.byVendor ?? {})) {
@@ -763,33 +722,39 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
               for (const t of rateTypes) {
                 const c = cell[t];
                 if (c) {
+                  const baseRate = c.rate ?? 0;
                   byVendor[vendorId][t] = {
                     prefixes: c.prefixes ?? [],
-                    rate: c.rate ?? 0,
-                    ratePlusExtra: inExtra && appliedExtra ? (c.rate ?? 0) + appliedExtra.value : null,
+                    rate: baseRate,
+                    ratePlusExtra: appliedFees ? applyFeesToRate(baseRate) : null,
                   };
                 }
               }
             } else {
               const leg = cell as { prefixes?: string[]; rate?: number };
+              const baseRate = leg?.rate ?? 0;
               byVendor[vendorId] = {
                 International: {
                   prefixes: leg?.prefixes ?? [],
-                  rate: leg?.rate ?? 0,
-                  ratePlusExtra: inExtra && appliedExtra ? (leg?.rate ?? 0) + appliedExtra.value : null,
+                  rate: baseRate,
+                  ratePlusExtra: appliedFees ? applyFeesToRate(baseRate) : null,
                 },
               };
             }
           }
           return { ...row, byVendor };
         });
-        const extraCountriesList = appliedExtra ? [...appliedExtra.countries] : [];
+        const { extra: _extra, ...snapRest } = snap;
         const snapshot = {
-          ...snap,
+          ...snapRest,
           rows,
-          ...(appliedExtra && {
-            extra: { countries: extraCountriesList, value: appliedExtra.value },
-          }),
+          displayColumns: selectedColumnsList.map((c) => ({ vendorId: c.vendor.id, rateType: c.rateType })),
+          ...(appliedFees && (appliedFees.marginFee || appliedFees.psfFee)
+            ? {
+                marginFee: appliedFees.marginFee ?? undefined,
+                psfFee: appliedFees.psfFee ?? undefined,
+              }
+            : {}),
         };
         const { error } = await supabase
           .from("saved_quotations")
@@ -811,14 +776,17 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
         toast.error("No data to save");
         return;
       }
-      const extraCountriesList = appliedExtra ? [...appliedExtra.countries] : [];
       const snapshot = {
         vendors: selectedVendorsList.map((v) => ({ id: v.id, nombre: v.nombre })),
         rateTypes: [...RATE_TYPES],
         lineTypes: [...LINE_TYPES],
-        ...(appliedExtra && {
-          extra: { countries: extraCountriesList, value: appliedExtra.value },
-        }),
+        displayColumns: selectedColumnsList.map((c) => ({ vendorId: c.vendor.id, rateType: c.rateType })),
+        ...(appliedFees && (appliedFees.marginFee || appliedFees.psfFee)
+          ? {
+              marginFee: appliedFees.marginFee ?? undefined,
+              psfFee: appliedFees.psfFee ?? undefined,
+            }
+          : {}),
         rows: rowsToSave.map((row) => ({
           country: row.country,
           lineType: row.lineType,
@@ -831,9 +799,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                   cells[t] = {
                     prefixes: cell.prefixes,
                     rate: cell.rate,
-                    ratePlusExtra: countryInExtra(row.country)
-                      ? cell.rate + (appliedExtra?.value ?? 0)
-                      : null,
+                    ratePlusExtra: appliedFees ? applyFeesToRate(cell.rate) : null,
                   };
                 }
               }
@@ -863,21 +829,27 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
     }
   };
 
-  interface VendorCellByType {
-    prefixes: string[];
-    rate: number;
-  }
-
   type RowByVendorMap = Map<string, Partial<Record<RateType, VendorCellByType>>>;
+
+  const selectedVendorsList = useMemo(
+    () =>
+      editQuotation?.snapshot?.vendors?.length
+        ? (editQuotation.snapshot.vendors as Vendor[])
+        : (() => {
+            const vendorIds = new Set(selectedColumnsList.map((c) => c.vendor.id));
+            return vendorsWithUploads.filter((v) => vendorIds.has(v.id));
+          })(),
+    [editQuotation, selectedColumnsList, vendorsWithUploads]
+  );
 
   const vendorListForTable = useMemo(
     () =>
       editQuotation?.snapshot?.vendors?.length
         ? (editQuotation.snapshot.vendors as Vendor[])
-        : selectedVendorIds.size > 0
-          ? vendorsWithUploads.filter((v) => selectedVendorIds.has(v.id))
+        : selectedVendorsList.length > 0
+          ? selectedVendorsList
           : vendorsWithUploads,
-    [editQuotation, selectedVendorIds, vendorsWithUploads]
+    [editQuotation, selectedVendorsList, vendorsWithUploads]
   );
 
   const tableRows = useMemo(
@@ -893,41 +865,57 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
     [editQuotation, rates, effectiveCountryFilter, vendorListForTable, search, uploadById]
   );
 
-  const selectedVendorsList = useMemo(
-    () =>
-      editQuotation?.snapshot?.vendors?.length
-        ? (editQuotation.snapshot.vendors as Vendor[])
-        : selectedVendorIds.size > 0
-          ? vendorsWithUploads.filter((v) => selectedVendorIds.has(v.id))
-          : [],
-    [editQuotation, selectedVendorIds, vendorsWithUploads]
-  );
-
   const totalPages = Math.max(1, Math.ceil(totalCountries / pageSize));
   const canPrev = page > 1;
   const canNext = page < totalPages;
 
-  /**
-   * Best vendor: prioritize vendors with MORE rate values (International, Origin Based, Local).
-   * Among vendors with the same count, pick the one with the lowest min rate.
-   */
-  const getBestVendorForRow = useCallback(
-    (row: { country: string; lineType: LineType; byVendor: RowByVendorMap }) => {
-      const candidates: { id: string; count: number; minRate: number }[] = [];
-      for (const [vendorId, byType] of row.byVendor) {
-        const rates = RATE_TYPES.map((t) => byType?.[t]?.rate).filter((r): r is number => r != null && r >= 0);
-        if (rates.length === 0) continue;
-        candidates.push({ id: vendorId, count: rates.length, minRate: Math.min(...rates) });
+  /** Best = vendor + rate type with lowest rate among all selected columns. */
+  const getBestVendorAndRateForRow = useCallback(
+    (
+      row: { country: string; lineType: LineType; byVendor: RowByVendorMap }
+    ): { vendorId: string | null; rateType: string | null; rate: number | null; vendorName: string | null } => {
+      let bestVendorId: string | null = null;
+      let bestRateType: string | null = null;
+      let bestRate: number | null = null;
+      let bestVendorName: string | null = null;
+      for (const col of selectedColumnsList) {
+        const byType = row.byVendor.get(col.vendor.id);
+        const rate = byType?.[col.rateType]?.rate;
+        if (rate == null || rate < 0) continue;
+        if (bestRate == null || rate < bestRate) {
+          bestRate = rate;
+          bestVendorId = col.vendor.id;
+          bestRateType = col.rateType;
+          bestVendorName = col.vendor.nombre;
+        }
       }
-      if (candidates.length === 0) return selectedVendorsList[0]?.id ?? null;
-      candidates.sort((a, b) => {
-        if (b.count !== a.count) return b.count - a.count;
-        return a.minRate - b.minRate;
-      });
-      return candidates[0].id;
+      return { vendorId: bestVendorId, rateType: bestRateType, rate: bestRate, vendorName: bestVendorName };
     },
-    [selectedVendorsList]
+    [selectedColumnsList]
   );
+
+  const getRateForColumnKey = useCallback(
+    (row: { country: string; lineType: LineType; byVendor: RowByVendorMap }, key: string): number | null => {
+      const [vendorId, rateType] = key.split("\t");
+      if (!vendorId || !rateType) return null;
+      const byType = row.byVendor.get(vendorId);
+      const rate = byType?.[rateType]?.rate;
+      return rate != null && rate >= 0 ? rate : null;
+    },
+    []
+  );
+
+  const getMarginAmount = (rate: number): number => {
+    if (!appliedFees?.marginFee || appliedFees.marginFee.value === 0) return 0;
+    const m = appliedFees.marginFee;
+    return m.mode === "percentage" ? rate * (m.value / 100) : m.value;
+  };
+
+  const getPsfAmount = (rate: number): number => {
+    if (!appliedFees?.psfFee || appliedFees.psfFee.value === 0) return 0;
+    const p = appliedFees.psfFee;
+    return p.mode === "percentage" ? rate * (p.value / 100) : p.value;
+  };
 
   const getRowKey = (row: { country: string; lineType: LineType }) => `${row.country}\t${row.lineType}`;
 
@@ -957,45 +945,16 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
       <div className="rounded-2xl border border-border bg-card p-6 space-y-6">
         <h3 className="text-sm font-semibold text-foreground">Choose what to compare</h3>
 
-        <div className="grid gap-6 sm:grid-cols-2">
+        <div className="grid gap-6 sm:grid-cols-3">
           <div className="space-y-2">
-            <div className="flex items-center justify-between gap-2">
-              <Label>Filter by</Label>
-              <div className="flex rounded-md border border-border overflow-hidden">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setFilterMode("country");
-                    setSelectedRegions(new Set());
-                  }}
-                  className={`px-2.5 py-1 text-xs font-medium transition-colors ${
-                    filterMode === "country" ? "bg-primary text-primary-foreground" : "bg-muted/50 text-muted-foreground hover:bg-muted"
-                  }`}
-                >
-                  Country
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setFilterMode("region");
-                    setSelectedCountries(new Set());
-                  }}
-                  className={`px-2.5 py-1 text-xs font-medium transition-colors border-l border-border ${
-                    filterMode === "region" ? "bg-primary text-primary-foreground" : "bg-muted/50 text-muted-foreground hover:bg-muted"
-                  }`}
-                >
-                  Region
-                </button>
-              </div>
-            </div>
+            <Label>Countries</Label>
             <div ref={countriesRef} className="relative">
             <Collapsible
               open={countriesOpen}
               onOpenChange={(open) => {
                 setCountriesOpen(open);
                 if (open) {
-                  setVendorsOpen(false);
-                  setExtraCountriesOpen(false);
+                  setColumnsOpen(false);
                 }
               }}
             >
@@ -1006,13 +965,9 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                   size="sm"
                 >
                   <span className="text-muted-foreground">
-                    {filterMode === "country"
-                      ? selectedCountries.size === 0
-                        ? "Select countries"
-                        : `${selectedCountries.size} country(ies)`
-                      : selectedRegions.size === 0
-                        ? "Select regions"
-                        : `${selectedRegions.size} region(s)`}
+                    {selectedCountries.size === 0
+                      ? "Select countries"
+                      : `${selectedCountries.size} country(ies)`}
                   </span>
                   <ChevronDown className="h-4 w-4 opacity-50" />
                 </Button>
@@ -1027,50 +982,24 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                     onClick={(e) => e.stopPropagation()}
                     className="w-full px-2 py-1.5 text-xs rounded border border-border bg-background mb-2"
                   />
-                  {filterMode === "country" ? (
-                    <>
-                      <label className="flex items-center gap-2 text-sm cursor-pointer">
-                        <Checkbox
-                          checked={filteredCountries.length > 0 && filteredCountries.every((c) => selectedCountries.has(c))}
-                          onCheckedChange={selectAllCountries}
-                        />
-                        <span className="text-muted-foreground">All</span>
-                      </label>
-                      {filteredCountries.map((c) => (
-                        <label key={c} className="flex items-center gap-2 text-sm cursor-pointer">
-                          <Checkbox
-                            checked={selectedCountries.has(c)}
-                            onCheckedChange={() => toggleCountry(c)}
-                          />
-                          {c}
-                        </label>
-                      ))}
-                      {filteredCountries.length === 0 && (
-                        <p className="text-xs text-muted-foreground">{countriesSearch ? "No matches." : "No country data. Add countries in Settings."}</p>
-                      )}
-                    </>
-                  ) : (
-                    <>
-                      <label className="flex items-center gap-2 text-sm cursor-pointer">
-                        <Checkbox
-                          checked={filteredRegions.length > 0 && filteredRegions.every((r) => selectedRegions.has(r))}
-                          onCheckedChange={selectAllRegions}
-                        />
-                        <span className="text-muted-foreground">All</span>
-                      </label>
-                      {filteredRegions.map((r) => (
-                        <label key={r} className="flex items-center gap-2 text-sm cursor-pointer">
-                          <Checkbox
-                            checked={selectedRegions.has(r)}
-                            onCheckedChange={() => toggleRegion(r)}
-                          />
-                          {r}
-                        </label>
-                      ))}
-                      {filteredRegions.length === 0 && (
-                        <p className="text-xs text-muted-foreground">{countriesSearch ? "No matches." : "No regions. Add regions in Settings."}</p>
-                      )}
-                    </>
+                  <label className="flex items-center gap-2 text-sm cursor-pointer">
+                    <Checkbox
+                      checked={filteredCountries.length > 0 && filteredCountries.every((c) => selectedCountries.has(c))}
+                      onCheckedChange={selectAllCountries}
+                    />
+                    <span className="text-muted-foreground">All</span>
+                  </label>
+                  {filteredCountries.map((c) => (
+                    <label key={c} className="flex items-center gap-2 text-sm cursor-pointer">
+                      <Checkbox
+                        checked={selectedCountries.has(c)}
+                        onCheckedChange={() => toggleCountry(c)}
+                      />
+                      {c}
+                    </label>
+                  ))}
+                  {filteredCountries.length === 0 && (
+                    <p className="text-xs text-muted-foreground">{countriesSearch ? "No matches." : "No country data. Add countries in Settings."}</p>
                   )}
                 </div>
               </CollapsibleContent>
@@ -1079,15 +1008,14 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
           </div>
 
           <div className="space-y-2">
-            <Label>Vendors</Label>
-            <div ref={vendorsRef} className="relative">
+            <Label>Vendors - Rate</Label>
+            <div ref={columnsRef} className="relative">
             <Collapsible
-              open={vendorsOpen}
+              open={columnsOpen}
               onOpenChange={(open) => {
-                setVendorsOpen(open);
+                setColumnsOpen(open);
                 if (open) {
                   setCountriesOpen(false);
-                  setExtraCountriesOpen(false);
                 }
               }}
             >
@@ -1098,9 +1026,9 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                   size="sm"
                 >
                   <span className="text-muted-foreground">
-                    {selectedVendorIds.size === 0
-                      ? "Select vendors"
-                      : `${selectedVendorIds.size} vendor(s)`}
+                    {selectedColumnPairs.size === 0
+                      ? "Select comparisons"
+                      : `${selectedColumnPairs.size} comparison(s)`}
                   </span>
                   <ChevronDown className="h-4 w-4 opacity-50" />
                 </Button>
@@ -1109,37 +1037,37 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                 <div className="mt-2 rounded-lg border border-border bg-muted/30 p-3 max-h-48 overflow-y-auto space-y-2">
                   <input
                     type="text"
-                    placeholder="Search…"
-                    value={vendorsSearch}
-                    onChange={(e) => setVendorsSearch(e.target.value)}
+                    placeholder="Search vendor or rate type…"
+                    value={columnsSearch}
+                    onChange={(e) => setColumnsSearch(e.target.value)}
                     onClick={(e) => e.stopPropagation()}
                     className="w-full px-2 py-1.5 text-xs rounded border border-border bg-background mb-2"
                   />
                   <label className="flex items-center gap-2 text-sm cursor-pointer">
                     <Checkbox
                       checked={
-                        filteredVendors.length > 0 &&
-                        filteredVendors.every((v) => selectedVendorIds.has(v.id))
+                        filteredColumnOptions.length > 0 &&
+                        filteredColumnOptions.every((opt) => selectedColumnPairs.has(opt.key))
                       }
-                      onCheckedChange={selectAllVendors}
+                      onCheckedChange={selectAllColumns}
                     />
                     <span className="text-muted-foreground">All</span>
                   </label>
-                  {filteredVendors.map((v) => (
+                  {filteredColumnOptions.map((opt) => (
                     <label
-                      key={v.id}
+                      key={opt.key}
                       className="flex items-center gap-2 text-sm cursor-pointer"
                     >
                       <Checkbox
-                        checked={selectedVendorIds.has(v.id)}
-                        onCheckedChange={() => toggleVendor(v.id)}
+                        checked={selectedColumnPairs.has(opt.key)}
+                        onCheckedChange={() => toggleColumnPair(opt.key)}
                       />
-                      {v.nombre}
+                      {opt.vendor.nombre} - {opt.rateType}
                     </label>
                   ))}
-                  {filteredVendors.length === 0 && (
+                  {filteredColumnOptions.length === 0 && (
                     <p className="text-xs text-muted-foreground">
-                      {vendorsSearch ? "No matches." : "No vendors with uploaded files. Assign a vendor when uploading a CSV."}
+                      {columnsSearch ? "No matches." : "No vendors with uploaded files. Assign a vendor when uploading a CSV."}
                     </p>
                   )}
                 </div>
@@ -1152,153 +1080,85 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
         <div className="grid gap-6 sm:grid-cols-2">
           <div className="space-y-2 sm:col-start-1">
             <div className="flex items-center justify-between gap-2">
-              <Label>Apply extra to</Label>
+              <Label>Margin fee</Label>
               <div className="flex rounded-md border border-border overflow-hidden">
                 <button
                   type="button"
-                  onClick={() => {
-                    setExtraFilterMode("country");
-                    setSelectedExtraRegions(new Set());
-                  }}
+                  onClick={() => setMarginFeeMode("percentage")}
                   className={`px-2.5 py-1 text-xs font-medium transition-colors ${
-                    extraFilterMode === "country" ? "bg-primary text-primary-foreground" : "bg-muted/50 text-muted-foreground hover:bg-muted"
+                    marginFeeMode === "percentage" ? "bg-primary text-primary-foreground" : "bg-muted/50 text-muted-foreground hover:bg-muted"
                   }`}
                 >
-                  Country
+                  %
                 </button>
                 <button
                   type="button"
-                  onClick={() => {
-                    setExtraFilterMode("region");
-                    setExtraCountries(new Set());
-                  }}
-                  className={`px-2.5 py-1 text-xs font-medium transition-colors border-l border-border ${
-                    extraFilterMode === "region" ? "bg-primary text-primary-foreground" : "bg-muted/50 text-muted-foreground hover:bg-muted"
+                  onClick={() => setMarginFeeMode("fixed")}
+                  className={`px-2.5 py-1 text-xs font-medium transition-colors border-l border-border flex items-center justify-center ${
+                    marginFeeMode === "fixed" ? "bg-primary text-primary-foreground" : "bg-muted/50 text-muted-foreground hover:bg-muted"
                   }`}
+                  title="Fixed"
                 >
-                  Region
+                  <DollarSign className="w-3.5 h-3.5" />
                 </button>
               </div>
             </div>
-            <div ref={extraCountriesRef} className="relative">
-            <Collapsible
-              open={extraCountriesOpen}
-              onOpenChange={(open) => {
-                setExtraCountriesOpen(open);
-                if (open) {
-                  setCountriesOpen(false);
-                  setVendorsOpen(false);
-                }
-              }}
-            >
-              <CollapsibleTrigger asChild>
-                <Button
-                  variant="outline"
-                  className="w-full justify-between font-normal"
-                  size="sm"
-                >
-                  <span className="text-muted-foreground">
-                    {extraFilterMode === "country"
-                      ? extraCountries.size === 0
-                        ? "Select countries"
-                        : `${extraCountries.size} country(ies)`
-                      : selectedExtraRegions.size === 0
-                        ? "Select regions"
-                        : `${selectedExtraRegions.size} region(s)`}
-                  </span>
-                  <ChevronDown className="h-4 w-4 opacity-50" />
-                </Button>
-              </CollapsibleTrigger>
-              <CollapsibleContent>
-                <div className="mt-2 rounded-lg border border-border bg-muted/30 p-3 max-h-48 overflow-y-auto space-y-2">
-                  <input
-                    type="text"
-                    placeholder="Search…"
-                    value={extraCountriesSearch}
-                    onChange={(e) => setExtraCountriesSearch(e.target.value)}
-                    onClick={(e) => e.stopPropagation()}
-                    className="w-full px-2 py-1.5 text-xs rounded border border-border bg-background mb-2"
-                  />
-                  {extraFilterMode === "country" ? (
-                    <>
-                      <label className="flex items-center gap-2 text-sm cursor-pointer">
-                        <Checkbox
-                          checked={filteredExtraCountries.length > 0 && filteredExtraCountries.every((c) => extraCountries.has(c))}
-                          onCheckedChange={selectAllExtraCountries}
-                        />
-                        <span className="text-muted-foreground">All</span>
-                      </label>
-                      {filteredExtraCountries.map((c) => (
-                        <label key={c} className="flex items-center gap-2 text-sm cursor-pointer">
-                          <Checkbox
-                            checked={extraCountries.has(c)}
-                            onCheckedChange={() => toggleExtraCountry(c)}
-                          />
-                          {c}
-                        </label>
-                      ))}
-                      {filteredExtraCountries.length === 0 && (
-                        <p className="text-xs text-muted-foreground">{extraCountriesSearch ? "No matches." : "No country data."}</p>
-                      )}
-                    </>
-                  ) : (
-                    <>
-                      <label className="flex items-center gap-2 text-sm cursor-pointer">
-                        <Checkbox
-                          checked={filteredExtraRegions.length > 0 && filteredExtraRegions.every((r) => selectedExtraRegions.has(r))}
-                          onCheckedChange={selectAllExtraRegions}
-                        />
-                        <span className="text-muted-foreground">All</span>
-                      </label>
-                      {filteredExtraRegions.map((r) => (
-                        <label key={r} className="flex items-center gap-2 text-sm cursor-pointer">
-                          <Checkbox
-                            checked={selectedExtraRegions.has(r)}
-                            onCheckedChange={() => toggleExtraRegion(r)}
-                          />
-                          {r}
-                        </label>
-                      ))}
-                      {filteredExtraRegions.length === 0 && (
-                        <p className="text-xs text-muted-foreground">{extraCountriesSearch ? "No matches." : "No regions."}</p>
-                      )}
-                    </>
-                  )}
-                </div>
-              </CollapsibleContent>
-            </Collapsible>
-            </div>
+            <input
+              type="text"
+              inputMode="decimal"
+              value={marginFeeInput}
+              onChange={(e) => handleFeeInputChange(setMarginFeeInput, e)}
+              className="w-full px-3 py-1.5 text-xs rounded-lg border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring font-mono"
+            />
           </div>
           <div className="space-y-2 sm:col-start-2">
-            <Label>Extra amount (numeric)</Label>
-            <div className="flex gap-2">
-              <input
-                type="text"
-                inputMode="decimal"
-                placeholder="e.g. 0.005"
-                value={extraValueInput}
-                onChange={handleExtraValueChange}
-                disabled={effectiveExtraCountries.size === 0}
-                className="flex-1 px-3 py-1.5 text-xs rounded-lg border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring font-mono"
-              />
-              <Button
-                type="button"
-                variant="secondary"
-                size="sm"
-                onClick={handleApplyExtra}
-                disabled={effectiveExtraCountries.size === 0}
-                title={effectiveExtraCountries.size === 0 ? "Select at least one country or region first" : undefined}
-              >
-                Apply
-              </Button>
+            <div className="flex items-center justify-between gap-2">
+              <Label>PSF fee</Label>
+              <div className="flex rounded-md border border-border overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => setPsfFeeMode("percentage")}
+                  className={`px-2.5 py-1 text-xs font-medium transition-colors ${
+                    psfFeeMode === "percentage" ? "bg-primary text-primary-foreground" : "bg-muted/50 text-muted-foreground hover:bg-muted"
+                  }`}
+                >
+                  %
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPsfFeeMode("fixed")}
+                  className={`px-2.5 py-1 text-xs font-medium transition-colors border-l border-border flex items-center justify-center ${
+                    psfFeeMode === "fixed" ? "bg-primary text-primary-foreground" : "bg-muted/50 text-muted-foreground hover:bg-muted"
+                  }`}
+                  title="Fixed"
+                >
+                  <DollarSign className="w-3.5 h-3.5" />
+                </button>
+              </div>
             </div>
-            {appliedExtra && (
-              <p className="text-xs text-muted-foreground">
-                Applied +{appliedExtra.value.toFixed(4)} to {appliedExtra.countries.size} country(ies)
-              </p>
-            )}
+            <input
+              type="text"
+              inputMode="decimal"
+              value={psfFeeInput}
+              onChange={(e) => handleFeeInputChange(setPsfFeeInput, e)}
+              className="w-full px-3 py-1.5 text-xs rounded-lg border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring font-mono"
+            />
           </div>
         </div>
+        <Button onClick={handleApply} size="sm" className="mt-2">
+          Apply
+        </Button>
+        {appliedFees && (appliedFees.marginFee || appliedFees.psfFee) && (
+          <p className="text-xs text-muted-foreground">
+            {appliedFees.marginFee && (
+              <>Margin: {appliedFees.marginFee.mode === "percentage" ? `${appliedFees.marginFee.value}%` : `+${appliedFees.marginFee.value.toFixed(4)}`}</>
+            )}
+            {appliedFees.marginFee && appliedFees.psfFee && " · "}
+            {appliedFees.psfFee && (
+              <>PSF: {appliedFees.psfFee.mode === "percentage" ? `${appliedFees.psfFee.value}%` : `+${appliedFees.psfFee.value.toFixed(4)}`}</>
+            )}
+          </p>
+        )}
 
         <div className="flex items-center gap-3">
           <div className="relative flex-1 max-w-xs">
@@ -1311,15 +1171,11 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
               className="pl-8 pr-3 py-1.5 text-xs rounded-lg border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring w-full"
             />
           </div>
-          <Button variant="ghost" size="sm" onClick={fetchData}>
-            <RefreshCw className="w-3.5 h-3.5 mr-1.5" />
-            Refresh
-          </Button>
           <Button
             variant="outline"
             size="sm"
             onClick={() => void handleExportXlsx()}
-            disabled={selectedVendorsList.length === 0 || totalCountries === 0 || exportingOrSaving}
+            disabled={selectedColumnsList.length === 0 || totalCountries === 0 || exportingOrSaving}
           >
             <FileDown className="w-3.5 h-3.5 mr-1.5" />
             Export XLSX
@@ -1328,7 +1184,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
             variant="secondary"
             size="sm"
             onClick={() => setSaveDialogOpen(true)}
-            disabled={selectedVendorsList.length === 0 || totalCountries === 0 || exportingOrSaving}
+            disabled={selectedColumnsList.length === 0 || totalCountries === 0 || exportingOrSaving}
           >
             <Save className="w-3.5 h-3.5 mr-1.5" />
             {editQuotationId ? "Update quotation" : "Save quotation"}
@@ -1380,11 +1236,13 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
         </DialogContent>
       </Dialog>
 
-      {(selectedVendorsList.length === 0 || effectiveCountryFilter.size === 0) && !(editQuotation && editQuotation.snapshot?.rows?.length) ? (
+      {(!hasApplied || selectedColumnsList.length === 0 || effectiveCountryFilter.size === 0) && !(editQuotation && editQuotation.snapshot?.rows?.length) ? (
         <div className="flex flex-col items-center justify-center py-16 text-muted-foreground gap-2 rounded-2xl border border-border bg-card">
           <Building2 className="w-8 h-8 opacity-30" />
           <p className="text-sm">
-            Select at least one country (or region), one vendor with data, and then you can see the comparison.
+            {!hasApplied
+              ? "Select countries, vendor-rate comparisons, enter margin fee (required), and click Apply to load the table."
+              : "Select at least one country and one comparison to see the table."}
           </p>
         </div>
       ) : (
@@ -1400,72 +1258,86 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                 <tr className="border-b border-border">
                   <th
                     rowSpan={2}
-                    className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide bg-muted border-r border-border w-[6rem] min-w-[6rem] align-bottom"
+                    className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide bg-muted border-r border-border w-[6rem] min-w-[6rem]"
                   >
                     Country
                   </th>
                   <th
                     rowSpan={2}
-                    className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide bg-muted border-r-2 border-border w-[5rem] min-w-[5rem] align-bottom"
+                    className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide bg-muted border-r-2 border-border w-[5rem] min-w-[5rem]"
                   >
                     Type
                   </th>
-                  {selectedVendorsList.map((v) => (
+                  {columnsGroupedByVendor.map((g) => (
                     <th
-                      key={v.id}
-                      colSpan={1 + RATE_TYPES.length}
-                      className="text-center px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide bg-muted/70 border-l-2 border-border min-w-[10rem]"
+                      key={g.vendor.id}
+                      colSpan={g.rateTypes.length}
+                      className="text-center px-4 py-2.5 text-xs font-semibold text-muted-foreground bg-muted/80 border-l-2 border-border min-w-[8rem]"
                     >
-                      <span className="truncate block" title={v.nombre}>
-                        {v.nombre}
-                      </span>
+                      {g.vendor.nombre}
                     </th>
                   ))}
                   <th
                     rowSpan={2}
-                    className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide bg-muted/50 border-l-2 border-border min-w-[8rem] align-bottom"
+                    className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide bg-muted/50 border-l-2 border-border min-w-[6rem]"
                   >
-                    Best vendor
+                    LCR Vendor
                   </th>
                   <th
-                    colSpan={3}
-                    className="text-center px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide bg-muted/50 border-l-2 border-border min-w-[12rem]"
+                    rowSpan={2}
+                    className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide bg-muted/50 border-l border-border min-w-[5rem]"
                   >
-                    Selected vendor + extra
+                    LCR Rate
+                  </th>
+                  <th
+                    rowSpan={2}
+                    className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide bg-muted/50 border-l border-border min-w-[6rem]"
+                  >
+                    Vendor Selected
+                  </th>
+                  <th
+                    rowSpan={2}
+                    className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide bg-muted/50 border-l border-border min-w-[5rem]"
+                  >
+                    Vendor Selected Rate
+                  </th>
+                  <th
+                    rowSpan={2}
+                    className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground bg-muted/50 border-l border-border min-w-[4rem]"
+                  >
+                    Margin
+                  </th>
+                  <th
+                    rowSpan={2}
+                    className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground bg-muted/50 border-l border-border min-w-[4rem]"
+                  >
+                    PSF
+                  </th>
+                  <th
+                    rowSpan={2}
+                    className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground bg-muted/50 border-l border-border min-w-[5rem]"
+                  >
+                    Total
                   </th>
                 </tr>
                 <tr className="border-b border-border">
-                  {selectedVendorsList.flatMap((v) => [
-                    <th
-                      key={`${v.id}-prefix`}
-                      className="text-left px-4 py-1.5 text-[10px] font-normal normal-case text-muted-foreground bg-muted/50 border-l-2 border-border min-w-[6rem]"
-                    >
-                      prefix
-                    </th>,
-                    ...RATE_TYPES.map((t, i) => (
+                  {columnsGroupedByVendor.map((g) =>
+                    g.rateTypes.map((t) => (
                       <th
-                        key={`${v.id}-${t}`}
-                        className={`text-left px-4 py-1.5 text-[10px] font-normal normal-case text-muted-foreground bg-muted/50 min-w-[5rem] ${i === 0 ? "border-l-2 border-border" : "border-l border-border"}`}
+                        key={`${g.vendor.id}-${t}`}
+                        className="text-left px-4 py-1.5 text-[10px] font-normal text-muted-foreground bg-muted/50 border-l border-border min-w-[5.5rem]"
                       >
-                        {t} rate
+                        {t}
                       </th>
-                    )),
-                  ])}
-                  {RATE_TYPES.map((t) => (
-                    <th
-                      key={`extra-${t}`}
-                      className="text-left px-4 py-1.5 text-[10px] font-normal normal-case text-muted-foreground bg-muted/50 border-l border-border min-w-[5.5rem]"
-                    >
-                      {t} + extra
-                    </th>
-                  ))}
+                    ))
+                  )}
                 </tr>
               </thead>
               <tbody>
                 {tableRows.length === 0 ? (
                   <tr>
                     <td
-                      colSpan={2 + selectedVendorsList.length * (1 + RATE_TYPES.length) + 1 + RATE_TYPES.length}
+                      colSpan={2 + selectedColumnsList.length + 7}
                       className="px-4 py-8 text-center text-muted-foreground"
                     >
                       {search ? "No records match the filter." : "No records for selection."}
@@ -1492,110 +1364,99 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                         >
                           {row.lineType}
                         </td>
-                        {selectedVendorsList.map((v) => {
-                          const byType = row.byVendor.get(v.id);
-                          const allPrefixes = RATE_TYPES.flatMap((t) => byType?.[t]?.prefixes ?? []);
-                          const uniquePrefixes = [...new Set(allPrefixes)];
-                          const prefixDisplay =
-                            uniquePrefixes.length <= 3
-                              ? uniquePrefixes.join(", ")
-                              : uniquePrefixes.slice(0, 3).join(", ") + ` (+${uniquePrefixes.length - 3} prefixes)`;
+                        {selectedColumnsList.map((col) => {
+                          const byType = row.byVendor.get(col.vendor.id);
+                          const cell = byType?.[col.rateType];
+                          const rate = cell?.rate;
                           return (
-                            <React.Fragment key={v.id}>
-                              <td
-                                className="px-4 py-2.5 border-l-2 border-border bg-card/50 font-mono text-xs align-top min-w-[6rem] max-w-[16rem]"
-                              >
-                                {uniquePrefixes.length ? (
-                                  uniquePrefixes.length > 3 ? (
-                                    <Tooltip>
-                                      <TooltipTrigger asChild>
-                                        <span className="break-words whitespace-normal cursor-help underline decoration-dotted">
-                                          {prefixDisplay}
-                                        </span>
-                                      </TooltipTrigger>
-                                      <TooltipContent>
-                                        <ul className="max-h-48 overflow-y-auto list-disc list-inside text-left space-y-0.5 font-mono text-xs">
-                                          {[...uniquePrefixes].sort().map((p, i) => (
-                                            <li key={i}>{p}</li>
-                                          ))}
-                                        </ul>
-                                      </TooltipContent>
-                                    </Tooltip>
-                                  ) : (
-                                    <span className="break-words whitespace-normal">{prefixDisplay}</span>
-                                  )
-                                ) : (
-                                  <span className="text-muted-foreground italic">—</span>
-                                )}
-                              </td>
-                              {RATE_TYPES.map((t) => {
-                                const cell = byType?.[t];
-                                const rate = cell?.rate;
-                                return (
-                                  <td
-                                    key={`${v.id}-${t}`}
-                                    className="px-4 py-2.5 border-l-2 border-border bg-card/50 min-w-[5.5rem]"
-                                  >
-                                    {rate != null ? (
-                                      <span className="font-mono text-foreground">{rate.toFixed(4)}</span>
-                                    ) : (
-                                      <span className="text-muted-foreground italic">—</span>
-                                    )}
-                                  </td>
-                                );
-                              })}
-                            </React.Fragment>
+                            <td
+                              key={col.vendor.id + col.rateType}
+                              className="px-4 py-2.5 border-l-2 border-border bg-card/50 min-w-[5.5rem]"
+                            >
+                              {rate != null ? (
+                                <span className="font-mono text-foreground">{rate.toFixed(4)}</span>
+                              ) : (
+                                <span className="text-muted-foreground italic">—</span>
+                              )}
+                            </td>
                           );
                         })}
                         {(() => {
                           const rowKey = getRowKey(row);
-                          const selectedVendorId = selectedBestVendorPerRow[rowKey] ?? getBestVendorForRow(row);
-                          const selectedVendor = selectedVendorsList.find((v) => v.id === selectedVendorId);
-                          const byType = selectedVendorId ? row.byVendor.get(selectedVendorId) : null;
-                          const extraVal = countryInExtra(row.country) ? appliedExtra?.value ?? 0 : 0;
+                          const { vendorId: bestVendorId, rateType: bestRateType, rate: bestRate, vendorName: bestVendorName } = getBestVendorAndRateForRow(row);
+                          const bestKey = bestVendorId && bestRateType ? `${bestVendorId}\t${bestRateType}` : "";
+                          const selectedKey = selectedColumnKeyPerRow[rowKey] ?? bestKey ?? "";
+                          const selectedCol = selectedColumnsList.find((c) => `${c.vendor.id}\t${c.rateType}` === selectedKey);
+                          const selectedRate = selectedKey ? getRateForColumnKey(row, selectedKey) : null;
+                          const marginAmount = selectedRate != null ? getMarginAmount(selectedRate) : null;
+                          const psfAmount = selectedRate != null ? getPsfAmount(selectedRate) : null;
+                          const total =
+                            selectedRate != null && marginAmount != null && psfAmount != null
+                              ? selectedRate + marginAmount + psfAmount
+                              : null;
                           return (
                             <>
-                              <td className="px-2 py-2 border-l-2 border-border bg-card/50 align-top">
+                              <td className="px-4 py-2.5 border-l-2 border-border bg-card/50 font-medium">
+                                {bestVendorName && bestRateType ? `${bestVendorName} - ${bestRateType}` : "—"}
+                              </td>
+                              <td className="px-4 py-2.5 font-mono border-l border-border bg-card/50 min-w-[5rem]">
+                                {bestRate != null ? (
+                                  <span className="text-foreground">{bestRate.toFixed(4)}</span>
+                                ) : (
+                                  <span className="text-muted-foreground italic">—</span>
+                                )}
+                              </td>
+                              <td className="px-2 py-2 border-l border-border bg-card/50 align-top">
                                 <Select
-                                  value={selectedVendorId ?? ""}
+                                  value={selectedKey || bestKey || ""}
                                   onValueChange={(val) =>
-                                    setSelectedBestVendorPerRow((prev) => ({ ...prev, [rowKey]: val }))
+                                    setSelectedColumnKeyPerRow((prev) => ({ ...prev, [rowKey]: val }))
                                   }
                                 >
-                                  <SelectTrigger className="h-8 text-xs min-w-[7rem]">
-                                    <SelectValue placeholder="Vendor" />
+                                  <SelectTrigger className="h-8 text-xs min-w-[8rem]">
+                                    <SelectValue placeholder="Vendor - Rate" />
                                   </SelectTrigger>
                                   <SelectContent>
-                                    {selectedVendorsList.map((v) => (
-                                      <SelectItem key={v.id} value={v.id}>
-                                        {v.nombre}
-                                      </SelectItem>
-                                    ))}
+                                    {selectedColumnsList.map((col) => {
+                                      const colKey = `${col.vendor.id}\t${col.rateType}`;
+                                      return (
+                                        <SelectItem key={colKey} value={colKey}>
+                                          {col.vendor.nombre} - {col.rateType}
+                                          {colKey === bestKey ? " (best)" : ""}
+                                        </SelectItem>
+                                      );
+                                    })}
                                   </SelectContent>
                                 </Select>
                               </td>
-                              {RATE_TYPES.map((t, i) => {
-                                const rate = byType?.[t]?.rate;
-                                const withExtra = rate != null && extraVal > 0 ? rate + extraVal : rate != null ? rate : null;
-                                const isLast = i === RATE_TYPES.length - 1;
-                                const isValidNumber =
-                                  withExtra != null &&
-                                  typeof withExtra === "number" &&
-                                  !Number.isNaN(withExtra);
-                                // Selected vendor + extra: background extends through Local + extra; always show "—" when no value
-                                return (
-                                  <td
-                                    key={`extra-${t}`}
-                                    className={`px-4 py-2.5 font-mono border-b border-border min-w-[5.5rem] !bg-muted/30 ${i === 0 ? "border-l-2 border-border" : "border-l border-border"} ${isLast ? "border-r-2 border-border" : ""}`}
-                                  >
-                                    {isValidNumber ? (
-                                      <span className="font-medium">{withExtra.toFixed(4)}</span>
-                                    ) : (
-                                      <span className="text-muted-foreground italic inline-block min-w-[1ch]">{"\u2014"}</span>
-                                    )}
-                                  </td>
-                                );
-                              })}
+                              <td className="px-4 py-2.5 font-mono border-l border-border bg-card/50 min-w-[5rem]">
+                                {selectedRate != null ? (
+                                  <span className="text-foreground">{selectedRate.toFixed(4)}</span>
+                                ) : (
+                                  <span className="text-muted-foreground italic">—</span>
+                                )}
+                              </td>
+                              <td className="px-4 py-2.5 font-mono border-l border-border bg-muted/30 min-w-[4rem]">
+                                {marginAmount != null ? (
+                                  <span className="text-foreground">{marginAmount.toFixed(4)}</span>
+                                ) : (
+                                  <span className="text-muted-foreground italic">—</span>
+                                )}
+                              </td>
+                              <td className="px-4 py-2.5 font-mono border-l border-border bg-muted/30 min-w-[4rem]">
+                                {psfAmount != null ? (
+                                  <span className="text-foreground">{psfAmount.toFixed(4)}</span>
+                                ) : (
+                                  <span className="text-muted-foreground italic">—</span>
+                                )}
+                              </td>
+                              <td className="px-4 py-2.5 font-mono border-l border-border bg-muted/40 min-w-[5rem] font-medium">
+                                {total != null ? (
+                                  <span className="text-foreground">{total.toFixed(4)}</span>
+                                ) : (
+                                  <span className="text-muted-foreground italic">—</span>
+                                )}
+                              </td>
                             </>
                           );
                         })()}
