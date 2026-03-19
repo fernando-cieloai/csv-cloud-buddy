@@ -29,7 +29,8 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { supabase } from "@/integrations/supabase/client";
-import { RefreshCw, Globe, MapPin, Eye, Pencil, Trash2, Plus } from "lucide-react";
+import { RefreshCw, Globe, MapPin, Eye, Pencil, Trash2, Plus, Upload } from "lucide-react";
+import CountriesFileUploader from "@/components/CountriesFileUploader";
 
 type Region = {
   id: string;
@@ -294,7 +295,7 @@ const AjustesPaises = () => {
     <div className="rounded-2xl border border-border bg-card p-8 space-y-6">
       <div className="flex items-center justify-between gap-4">
         <div className="space-y-1">
-          <h1 className="text-2xl font-bold text-foreground">Settings · Countries & Regions</h1>
+          <h1 className="text-2xl font-bold text-foreground">Countries & Regions</h1>
           <p className="text-sm text-muted-foreground max-w-xl">
             Manage regions and countries. Assign each country to a region. Create regions first, then add countries.
           </p>
@@ -411,6 +412,22 @@ const AjustesPaises = () => {
               </form>
             </DialogContent>
           </Dialog>
+        </div>
+      </div>
+
+      {/* Importar países desde archivo - visible siempre */}
+      <div className="rounded-xl border border-border bg-card p-4 mb-6">
+        <div className="space-y-4">
+          <div>
+            <p className="text-sm font-medium text-foreground flex items-center gap-2">
+              <Upload className="w-4 h-4" />
+              Importar países y regiones desde archivo
+            </p>
+            <p className="text-xs text-muted-foreground mt-1">
+              Sube un CSV o XLSX con columnas: Country, Region, RegionCode. Opcional: EffectiveDate, ValidTo, DateAdded.
+            </p>
+          </div>
+          <CountriesFileUploader onSuccess={fetchData} compact />
         </div>
       </div>
 

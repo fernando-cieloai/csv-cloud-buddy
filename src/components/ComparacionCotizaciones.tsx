@@ -3,6 +3,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { RefreshCw, Search, ChevronDown, ChevronLeft, ChevronRight, Building2, Save, FileDown, DollarSign } from "lucide-react";
 import * as XLSX from "xlsx";
 import { toast } from "sonner";
+import { QUOTATION_EXPORT_HEADERS, QUOTATION_DEFAULTS } from "@/lib/vendorTemplate";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
@@ -64,7 +65,7 @@ interface AggregatedRateRow {
 const RATE_TYPES = ["International", "Origin Based", "Local"] as const;
 type RateType = (typeof RATE_TYPES)[number];
 
-const LINE_TYPES = ["mobile", "landline", "others"] as const;
+const LINE_TYPES = ["mobile", "landline", "special"] as const;
 type LineType = (typeof LINE_TYPES)[number];
 
 function getRateType(rate_type: string | null): RateType {
@@ -78,10 +79,11 @@ function getRateType(rate_type: string | null): RateType {
 }
 
 function getLineType(line_type: string | null): LineType {
-  if (!line_type) return "others";
+  if (!line_type) return "special";
   const normalized = line_type.trim().toLowerCase();
+  if (normalized === "others") return "special"; // legacy
   if (LINE_TYPES.includes(normalized as LineType)) return normalized as LineType;
-  return "others";
+  return "special";
 }
 
 interface SnapshotRow {
@@ -121,6 +123,9 @@ interface SavedQuotation {
     psfFee?: { value: number; mode: "percentage" | "fixed" };
     displayRateTypes?: string[];
     displayColumns?: { vendorId: string; rateType: string }[];
+    effectiveDate?: string;
+    initialIncrement?: number;
+    nextIncrement?: number;
     rows: SavedQuotationRow[];
   };
 }
@@ -133,6 +138,8 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [searchBy, setSearchBy] = useState<"country" | "prefix" | "type">("country");
   const [selectedCountries, setSelectedCountries] = useState<Set<string>>(new Set());
   const [selectedColumnPairs, setSelectedColumnPairs] = useState<Set<string>>(new Set());
   const [columnsOpen, setColumnsOpen] = useState(false);
@@ -311,6 +318,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
       .map((u) => u.id);
   }, [uploads, selectedVendorIdsForFetch, vendorsWithUploads]);
 
+  const fetchRatesRequestId = useRef(0);
   const fetchRates = React.useCallback(async () => {
     const uploadIds = getUploadIdsForRates;
     if (uploadIds.length === 0) {
@@ -323,44 +331,73 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
       setTotalCountries(0);
       return;
     }
+    const id = ++fetchRatesRequestId.current;
     setRatesLoading(true);
     try {
       const countryFilterArr =
         effectiveCountryFilter.size > 0 ? Array.from(effectiveCountryFilter) : null;
-      const searchVal = search.trim() || null;
+      const searchVal = debouncedSearch.trim() || null;
 
-      const [{ data: countData, error: countErr }, { data: ratesData, error: ratesErr }] =
-        await Promise.all([
-          supabase.rpc("get_quotation_countries_count", {
-            p_upload_ids: uploadIds,
-            p_country_filter: countryFilterArr,
-            p_search: searchVal,
-          }),
+      const rpcOpts = {
+        p_upload_ids: uploadIds,
+        p_country_filter: countryFilterArr,
+        p_search: searchVal,
+        p_search_by: searchBy,
+      };
+
+      // Run sequentially when searching by type to avoid timeout (both queries are heavy)
+      let countData: unknown;
+      let ratesData: unknown;
+      let countErr: { message: string } | null = null;
+      let ratesErr: { message: string } | null = null;
+
+      if (searchBy === "type") {
+        const countRes = await supabase.rpc("get_quotation_countries_count", rpcOpts);
+        countData = countRes.data;
+        countErr = countRes.error;
+        if (id !== fetchRatesRequestId.current) return;
+        if (countErr) throw new Error(countErr.message);
+        const ratesRes = await supabase.rpc("get_quotation_rates_page", {
+          ...rpcOpts,
+          p_limit: pageSize,
+          p_offset: (page - 1) * pageSize,
+        });
+        ratesData = ratesRes.data;
+        ratesErr = ratesRes.error;
+      } else {
+        const [countRes, ratesRes] = await Promise.all([
+          supabase.rpc("get_quotation_countries_count", rpcOpts),
           supabase.rpc("get_quotation_rates_page", {
-            p_upload_ids: uploadIds,
-            p_country_filter: countryFilterArr,
-            p_search: searchVal,
+            ...rpcOpts,
             p_limit: pageSize,
             p_offset: (page - 1) * pageSize,
           }),
         ]);
+        countData = countRes.data;
+        countErr = countRes.error;
+        ratesData = ratesRes.data;
+        ratesErr = ratesRes.error;
+      }
 
+      if (id !== fetchRatesRequestId.current) return;
       if (countErr) throw new Error(countErr.message);
       if (ratesErr) throw new Error(ratesErr.message);
 
       setTotalCountries(Number(countData ?? 0));
       setRates((ratesData ?? []) as AggregatedRateRow[]);
     } catch (err) {
+      if (id !== fetchRatesRequestId.current) return;
       setError(err instanceof Error ? err.message : "Error loading rates");
       setRates([]);
       setTotalCountries(0);
     } finally {
-      setRatesLoading(false);
+      if (id === fetchRatesRequestId.current) setRatesLoading(false);
     }
   }, [
     getUploadIdsForRates,
     effectiveCountryFilter,
-    search,
+    debouncedSearch,
+    searchBy,
     page,
     pageSize,
   ]);
@@ -424,8 +461,13 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
   }, [editQuotationId]);
 
   useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search), 400);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  useEffect(() => {
     setPage(1);
-  }, [effectiveCountryFilter, search, selectedColumnPairs]);
+  }, [effectiveCountryFilter, debouncedSearch, searchBy, selectedColumnPairs]);
 
   useEffect(() => {
     if (editQuotationId || !hasApplied) return;
@@ -528,7 +570,6 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
     r: AggregatedRateRow[],
     countryFilter: Set<string>,
     vendorList: Vendor[],
-    searchQ: string
   ) => {
     const countryFilterLower = new Set([...countryFilter].map((c) => c.trim().toLowerCase()));
     const countryMatches = (country: string) =>
@@ -554,9 +595,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
       cell.prefixes = [...new Set([...cell.prefixes, ...(row.prefixes ?? [])])];
       if (row.rate > cell.rate) cell.rate = row.rate;
     }
-    let list = Array.from(keyToRow.values()).filter((row) => row.byVendor.size > 0);
-    if (searchQ)
-      list = list.filter((x) => x.country.toLowerCase().includes(searchQ));
+    const list = Array.from(keyToRow.values()).filter((row) => row.byVendor.size > 0);
     list.sort((a, b) => a.country.localeCompare(b.country) || LINE_TYPES.indexOf(a.lineType) - LINE_TYPES.indexOf(b.lineType));
     return list;
   };
@@ -569,7 +608,8 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
 
   const buildTableRowsFromSnapshot = (
     snapshot: SavedQuotation["snapshot"],
-    searchQ: string
+    searchQ: string,
+    searchByMode: "country" | "prefix" | "type"
   ): { country: string; lineType: LineType; byVendor: Map<string, Partial<Record<RateType, VendorCellByType>>> }[] => {
     const rateTypes = (snapshot.rateTypes ?? RATE_TYPES) as readonly string[];
     const rows = snapshot.rows ?? [];
@@ -603,14 +643,25 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
       return { country: row.country, lineType, byVendor };
     });
     let filtered = list.filter((row) => row.byVendor.size > 0);
-    if (searchQ) filtered = filtered.filter((x) => x.country.toLowerCase().includes(searchQ));
+    if (searchQ) {
+      const q = searchQ.toLowerCase();
+      filtered = filtered.filter((x) => {
+        if (searchByMode === "country") return x.country.toLowerCase().includes(q);
+        if (searchByMode === "type") return x.lineType.toLowerCase() === q || x.lineType.toLowerCase().includes(q);
+        if (searchByMode === "prefix") {
+          const prefixes = getAllPrefixesForRow(x);
+          return prefixes.some((p) => p.toLowerCase().includes(q));
+        }
+        return true;
+      });
+    }
     filtered.sort((a, b) => a.country.localeCompare(b.country) || LINE_TYPES.indexOf(a.lineType) - LINE_TYPES.indexOf(b.lineType));
     return filtered;
   };
 
   const fetchAllRatesForExport = async () => {
     if (editQuotation) {
-      return buildTableRowsFromSnapshot(editQuotation.snapshot, search.toLowerCase().trim());
+      return buildTableRowsFromSnapshot(editQuotation.snapshot, search.toLowerCase().trim(), searchBy);
     }
     const uploadIds = getUploadIdsForRates;
     if (uploadIds.length === 0) return [];
@@ -620,7 +671,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
         : vendorsWithUploads;
     const countryFilterArr =
       effectiveCountryFilter.size > 0 ? Array.from(effectiveCountryFilter) : null;
-    const searchVal = search.trim() || null;
+    const searchVal = debouncedSearch.trim() || null;
     let allAggregated: AggregatedRateRow[] = [];
     const pages = Math.ceil(totalCountries / pageSize) || 1;
     for (let i = 0; i < pages; i++) {
@@ -630,15 +681,11 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
         p_search: searchVal,
         p_limit: pageSize,
         p_offset: i * pageSize,
+        p_search_by: searchBy,
       });
       allAggregated = allAggregated.concat((data ?? []) as AggregatedRateRow[]);
     }
-    return buildTableRowsFromAggregated(
-      allAggregated,
-      effectiveCountryFilter,
-      vendorList,
-      search.toLowerCase().trim()
-    );
+    return buildTableRowsFromAggregated(allAggregated, effectiveCountryFilter, vendorList);
   };
 
   const handleExportXlsx = async () => {
@@ -651,27 +698,21 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
         toast.error("No data to export");
         return;
       }
-      const headerRow = [
-        "Country",
-        "Type",
-        ...selectedColumnsList.map((c) => `${c.vendor.nombre} - ${c.rateType}`),
-        "LCR Vendor",
-        "LCR Rate",
-        "Vendor Selected",
-        "Vendor Selected Rate",
-        "Margin",
-        "PSF",
-        "Total",
-      ];
+      const effectiveDate =
+        editQuotation?.snapshot?.effectiveDate ?? QUOTATION_DEFAULTS.getEffectiveDate();
+      const initialIncrement =
+        editQuotation?.snapshot?.initialIncrement ?? QUOTATION_DEFAULTS.initialIncrement;
+      const nextIncrement =
+        editQuotation?.snapshot?.nextIncrement ?? QUOTATION_DEFAULTS.nextIncrement;
+
+      const headerRow = [...QUOTATION_EXPORT_HEADERS];
 
       const dataRows = rowsToExport.map((row) => {
         const rowKey = getRowKey(row);
-        const { vendorId: bestVendorId, rateType: bestRateType, rate: bestRate, vendorName: bestVendorName } = getBestVendorAndRateForRow(row);
-        const bestVendorLabel = bestVendorName && bestRateType ? `${bestVendorName} - ${bestRateType}` : "";
+        const { vendorId: bestVendorId, rateType: bestRateType } = getBestVendorAndRateForRow(row);
         const bestKey = bestVendorId && bestRateType ? `${bestVendorId}\t${bestRateType}` : "";
         const selectedKey = selectedColumnKeyPerRow[rowKey] ?? bestKey ?? "";
         const selectedCol = selectedColumnsList.find((c) => `${c.vendor.id}\t${c.rateType}` === selectedKey);
-        const selectedLabel = selectedCol ? `${selectedCol.vendor.nombre} - ${selectedCol.rateType}` : "";
         const selectedRate = selectedKey ? getRateForColumnKey(row, selectedKey) : null;
         const marginAmount = selectedRate != null ? getMarginAmount(selectedRate) : null;
         const psfAmount = selectedRate != null ? getPsfAmount(selectedRate) : null;
@@ -679,17 +720,15 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
           selectedRate != null && marginAmount != null && psfAmount != null
             ? selectedRate + marginAmount + psfAmount
             : null;
-        const r: (string | number)[] = [row.country, row.lineType];
-        for (const col of selectedColumnsList) {
-          const vByType = row.byVendor.get(col.vendor.id);
-          const cell = vByType?.[col.rateType];
-          const rate = cell?.rate;
-          r.push(rate != null ? rate : "");
-        }
-        r.push(bestVendorLabel || "", bestRate ?? "");
-        r.push(selectedLabel || "", selectedRate ?? "");
-        r.push(marginAmount ?? "", psfAmount ?? "", total ?? "");
-        return r;
+        const type = row.lineType ?? "";
+        return [
+          row.country,
+          type ?? "",
+          total ?? "",
+          effectiveDate,
+          initialIncrement,
+          nextIncrement,
+        ];
       });
       const ws = XLSX.utils.aoa_to_sheet([headerRow, ...dataRows]);
       const wb = XLSX.utils.book_new();
@@ -749,6 +788,9 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
           ...snapRest,
           rows,
           displayColumns: selectedColumnsList.map((c) => ({ vendorId: c.vendor.id, rateType: c.rateType })),
+          effectiveDate: snap.effectiveDate ?? QUOTATION_DEFAULTS.getEffectiveDate(),
+          initialIncrement: snap.initialIncrement ?? QUOTATION_DEFAULTS.initialIncrement,
+          nextIncrement: snap.nextIncrement ?? QUOTATION_DEFAULTS.nextIncrement,
           ...(appliedFees && (appliedFees.marginFee || appliedFees.psfFee)
             ? {
                 marginFee: appliedFees.marginFee ?? undefined,
@@ -781,6 +823,9 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
         rateTypes: [...RATE_TYPES],
         lineTypes: [...LINE_TYPES],
         displayColumns: selectedColumnsList.map((c) => ({ vendorId: c.vendor.id, rateType: c.rateType })),
+        effectiveDate: QUOTATION_DEFAULTS.getEffectiveDate(),
+        initialIncrement: QUOTATION_DEFAULTS.initialIncrement,
+        nextIncrement: QUOTATION_DEFAULTS.nextIncrement,
         ...(appliedFees && (appliedFees.marginFee || appliedFees.psfFee)
           ? {
               marginFee: appliedFees.marginFee ?? undefined,
@@ -855,14 +900,9 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
   const tableRows = useMemo(
     () =>
       editQuotation?.snapshot?.rows?.length
-        ? buildTableRowsFromSnapshot(editQuotation.snapshot, search.toLowerCase().trim())
-        : buildTableRowsFromAggregated(
-            rates,
-            effectiveCountryFilter,
-            vendorListForTable,
-            search.toLowerCase().trim()
-          ),
-    [editQuotation, rates, effectiveCountryFilter, vendorListForTable, search, uploadById]
+        ? buildTableRowsFromSnapshot(editQuotation.snapshot, search.toLowerCase().trim(), searchBy)
+        : buildTableRowsFromAggregated(rates, effectiveCountryFilter, vendorListForTable),
+    [editQuotation, rates, effectiveCountryFilter, vendorListForTable, search, searchBy, uploadById]
   );
 
   const totalPages = Math.max(1, Math.ceil(totalCountries / pageSize));
@@ -918,6 +958,16 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
   };
 
   const getRowKey = (row: { country: string; lineType: LineType }) => `${row.country}\t${row.lineType}`;
+
+  const getAllPrefixesForRow = (row: { byVendor: Map<string, Partial<Record<RateType, VendorCellByType>>> }): string[] => {
+    const all = new Set<string>();
+    for (const byType of row.byVendor.values()) {
+      for (const cell of Object.values(byType)) {
+        if (cell?.prefixes) for (const p of cell.prefixes) all.add(p);
+      }
+    }
+    return [...all].sort();
+  };
 
   if (loading) {
     return (
@@ -1161,15 +1211,33 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
         )}
 
         <div className="flex items-center gap-3">
-          <div className="relative flex-1 max-w-xs">
-            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
-            <input
-              type="text"
-              placeholder="Filter by country or type (International/Origin Based/Local)…"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              className="pl-8 pr-3 py-1.5 text-xs rounded-lg border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring w-full"
-            />
+          <div className="flex items-center gap-2 flex-1 max-w-md">
+            <Select value={searchBy} onValueChange={(v) => setSearchBy(v as "country" | "prefix" | "type")}>
+              <SelectTrigger className="w-[7rem] shrink-0 text-xs h-8">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="country">Country</SelectItem>
+                <SelectItem value="prefix">Prefix</SelectItem>
+                <SelectItem value="type">Type</SelectItem>
+              </SelectContent>
+            </Select>
+            <div className="relative flex-1 min-w-0">
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
+              <input
+                type="text"
+                placeholder={
+                  searchBy === "country"
+                    ? "Search by country…"
+                    : searchBy === "prefix"
+                      ? "Search by prefix (e.g. 52, 1)…"
+                      : "Search by type (mobile, landline, special)…"
+                }
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="pl-8 pr-3 py-1.5 text-xs rounded-lg border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring w-full"
+              />
+            </div>
           </div>
           <Button
             variant="outline"
@@ -1268,6 +1336,12 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                   >
                     Type
                   </th>
+                  <th
+                    rowSpan={2}
+                    className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide bg-muted border-r-2 border-border min-w-[6rem]"
+                  >
+                    Prefix
+                  </th>
                   {columnsGroupedByVendor.map((g) => (
                     <th
                       key={g.vendor.id}
@@ -1337,7 +1411,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                 {tableRows.length === 0 ? (
                   <tr>
                     <td
-                      colSpan={2 + selectedColumnsList.length + 7}
+                      colSpan={3 + selectedColumnsList.length + 7}
                       className="px-4 py-8 text-center text-muted-foreground"
                     >
                       {search ? "No records match the filter." : "No records for selection."}
@@ -1363,6 +1437,30 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                           className="px-4 py-2.5 text-muted-foreground align-top bg-muted/20 border-r-2 border-border text-xs font-medium"
                         >
                           {row.lineType}
+                        </td>
+                        <td className="px-4 py-2.5 text-muted-foreground align-top bg-muted/20 border-r-2 border-border text-xs min-w-[6rem]">
+                          {(() => {
+                            const prefixes = getAllPrefixesForRow(row);
+                            const display = prefixes.slice(0, 3).join(", ");
+                            const more = prefixes.length > 3 ? ` (+${prefixes.length - 3} more)` : "";
+                            if (prefixes.length === 0) return <span className="italic">—</span>;
+                            return (
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <span className="cursor-help underline decoration-dotted decoration-muted-foreground">
+                                    {display}{more}
+                                  </span>
+                                </TooltipTrigger>
+                                <TooltipContent side="right" className="max-w-xs max-h-48 overflow-y-auto">
+                                  <ul className="font-mono text-xs list-disc list-inside space-y-0.5">
+                                    {prefixes.map((p) => (
+                                      <li key={p}>{p}</li>
+                                    ))}
+                                  </ul>
+                                </TooltipContent>
+                              </Tooltip>
+                            );
+                          })()}
                         </td>
                         {selectedColumnsList.map((col) => {
                           const byType = row.byVendor.get(col.vendor.id);

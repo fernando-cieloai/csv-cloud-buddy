@@ -158,6 +158,41 @@ export type Database = {
         }
         Relationships: []
       }
+      country_regions: {
+        Row: {
+          id: string
+          country_id: string
+          region: string
+          region_code: string
+          effective_date: string | null
+          valid_to: string | null
+          date_added: string | null
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          country_id: string
+          region: string
+          region_code: string
+          effective_date?: string | null
+          valid_to?: string | null
+          date_added?: string | null
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          country_id?: string
+          region?: string
+          region_code?: string
+          effective_date?: string | null
+          valid_to?: string | null
+          date_added?: string | null
+          created_at?: string
+        }
+        Relationships: [
+          { foreignKeyName: "country_regions_country_id_fkey"; columns: ["country_id"]; referencedRelation: "countries"; referencedColumns: ["id"] }
+        ]
+      }
       phone_rates: {
         Row: {
           country: string

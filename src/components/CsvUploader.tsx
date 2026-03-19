@@ -105,7 +105,25 @@ function buildColMap(header: string[]): Record<string, number> {
 }
 
 const XLSX_SHEET_NAMES = ["International", "Origin Based", "Local"] as const;
-const DATA_START_ROW = 12; // 0-indexed: row 13 in Excel has headers
+const LEGACY_DATA_START_ROW = 12; // 0-indexed: row 13 in Excel (legacy format)
+
+function looksLikeHeaderRow(row: string[] | undefined): boolean {
+  if (!row?.length) return false;
+  const lower = row.map((c) => String(c ?? "").toLowerCase().trim());
+  const hasCountry = lower.some((h) => h === "country");
+  const hasRate =
+    lower.some((h) => h === "rate" || h === "price") ||
+    lower.some((h) => h.includes("rate") || h.includes("price"));
+  const hasPrefix = lower.some((h) => h === "prefix");
+  return hasCountry && hasRate && hasPrefix;
+}
+
+function detectHeaderRow(rows: string[][]): number {
+  if (rows.length > 0 && looksLikeHeaderRow(rows[0])) return 0;
+  if (rows.length > LEGACY_DATA_START_ROW && looksLikeHeaderRow(rows[LEGACY_DATA_START_ROW]))
+    return LEGACY_DATA_START_ROW;
+  return 0; // default: assume template format
+}
 
 function parseSheetRows(
   sheet: XLSX.WorkSheet,
@@ -114,12 +132,13 @@ function parseSheetRows(
 ): PhoneRate[] {
   const rows = XLSX.utils.sheet_to_json<string[]>(sheet, { header: 1, defval: "" }) as string[][];
   const data: PhoneRate[] = [];
-  if (rows.length <= DATA_START_ROW) return data;
-  const headerRow = rows[DATA_START_ROW];
+  const headerRowIdx = detectHeaderRow(rows);
+  if (rows.length <= headerRowIdx) return data;
+  const headerRow = rows[headerRowIdx];
   if (!headerRow?.length) return data;
   const header = headerRow.map((c) => String(c ?? ""));
   const colMap = buildColMap(header);
-  for (let i = DATA_START_ROW + 1; i < rows.length; i++) {
+  for (let i = headerRowIdx + 1; i < rows.length; i++) {
     const row = rows[i];
     if (!row || row.every((c) => !String(c).trim())) continue;
     const cols = row.map((c) => String(c ?? "").trim());
@@ -231,6 +250,29 @@ export default function CsvUploader({ vendorId, onSuccess, compact = false }: Cs
   const doUpload = async (data: PhoneRate[], name: string) => {
     setStatus("uploading");
 
+    const prefixToCountry = new Map<string, string>();
+    let offset = 0;
+    const pageSize = 5000;
+    while (true) {
+      const { data: crData } = await supabase
+        .from("country_regions")
+        .select("region_code, countries(nombre)")
+        .range(offset, offset + pageSize - 1);
+      if (!crData?.length) break;
+      for (const r of crData) {
+        const code = String((r as { region_code: string }).region_code ?? "").trim().replace(/^\+/, "");
+        const country = (r as { countries: { nombre: string } | null }).countries?.nombre;
+        if (code && country) prefixToCountry.set(code, country);
+      }
+      if (crData.length < pageSize) break;
+      offset += pageSize;
+    }
+
+    const resolveCountry = (prefix: string, vendorCountry: string): string => {
+      const normalized = String(prefix ?? "").trim().replace(/^\+/, "");
+      return prefixToCountry.get(normalized) ?? vendorCountry;
+    };
+
     if (selectedVendorId) {
       const { data: existing } = await supabase
         .from("csv_uploads")
@@ -267,7 +309,7 @@ export default function CsvUploader({ vendorId, onSuccess, compact = false }: Cs
 
     for (let i = 0; i < data.length; i += BATCH) {
       const batch = data.slice(i, i + BATCH).map((row) => ({
-        country: row.country,
+        country: resolveCountry(row.prefix, row.country),
         network: row.network,
         prefix: row.prefix,
         rate: row.rate,

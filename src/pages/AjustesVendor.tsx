@@ -21,8 +21,9 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { supabase } from "@/integrations/supabase/client";
-import { RefreshCw, Eye, Pencil, Trash2, Plus, Upload } from "lucide-react";
+import { RefreshCw, Eye, Pencil, Trash2, Plus, Upload, Download } from "lucide-react";
 import CsvUploader from "@/components/CsvUploader";
+import { downloadVendorTemplate } from "@/lib/vendorTemplate";
 
 type VendorStatus = "activado" | "desactivado";
 
@@ -276,6 +277,27 @@ const AjustesVendor = () => {
             </form>
           </DialogContent>
         </Dialog>
+      </div>
+
+      {/* Download vendor template - for vendors without a specific format */}
+      <div className="mx-4 mt-4 rounded-xl border border-border bg-card p-4">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <p className="text-sm font-medium text-foreground">Vendor rate template</p>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              Use this template for vendors that don&apos;t have a specific format. Contains 3 sheets: International, Origin Based, Local.
+            </p>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            className="shrink-0 inline-flex items-center gap-2"
+            onClick={downloadVendorTemplate}
+          >
+            <Download className="w-4 h-4" />
+            Download template
+          </Button>
+        </div>
       </div>
 
       <div className="rounded-xl border border-border bg-background/40 mx-4 mt-4 mb-4">

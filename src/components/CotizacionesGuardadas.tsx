@@ -32,6 +32,10 @@ import {
 } from "@/components/ui/select";
 import { DateRangePicker } from "@/components/ui/date-range-picker";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import {
+  QUOTATION_EXPORT_HEADERS,
+  QUOTATION_DEFAULTS,
+} from "@/lib/vendorTemplate";
 
 const RATE_TYPES = ["International", "Origin Based", "Local"];
 
@@ -51,6 +55,9 @@ interface SavedQuotation {
     psfFee?: { value: number; mode: "percentage" | "fixed" };
     displayRateTypes?: string[];
     displayColumns?: { vendorId: string; rateType: string }[];
+    effectiveDate?: string;
+    initialIncrement?: number;
+    nextIncrement?: number;
     rows: {
       country: string;
       type?: string;
@@ -218,95 +225,42 @@ export default function CotizacionesGuardadas() {
   const handleExportXlsx = (q: SavedQuotation) => {
     const { vendors, rows, rateTypes } = q.snapshot;
     if (!vendors?.length || !rows?.length) return;
-    const useNewFormat = isNewSnapshotFormat(q.snapshot);
     const displayColumns = q.snapshot.displayColumns;
     const displayTypes = displayColumns?.length
       ? [...new Set(displayColumns.map((c) => c.rateType))]
       : q.snapshot.displayRateTypes?.length
         ? q.snapshot.displayRateTypes
-        : useNewFormat
-          ? (rateTypes ?? RATE_TYPES)
-          : ["rate"];
-    const types = useNewFormat ? (rateTypes ?? RATE_TYPES) : ["rate"];
-    const hasLineType = rows.some((r) => r.lineType != null);
-    const hasExtra = !!(q.snapshot.extra || q.snapshot.marginFee || q.snapshot.psfFee);
-    const useDisplayColumns = !!displayColumns?.length;
-    const useVendorTypeColumns = useDisplayColumns || !!q.snapshot.displayRateTypes?.length;
-    const vendorById = Object.fromEntries((vendors ?? []).map((v) => [v.id, v]));
+        : (rateTypes ?? RATE_TYPES);
+    const effectiveDate = q.snapshot.effectiveDate ?? QUOTATION_DEFAULTS.getEffectiveDate();
+    const initialIncrement = q.snapshot.initialIncrement ?? QUOTATION_DEFAULTS.initialIncrement;
+    const nextIncrement = q.snapshot.nextIncrement ?? QUOTATION_DEFAULTS.nextIncrement;
 
-    const headerRow = useNewFormat && hasLineType ? ["Country", "Type"] : useNewFormat ? ["Country"] : ["Country", "Type"];
-    if (useDisplayColumns) {
-      for (const col of displayColumns!) {
-        const v = vendorById[col.vendorId];
-        headerRow.push(v ? `${v.nombre} - ${col.rateType}` : col.rateType);
-      }
-    } else if (useVendorTypeColumns) {
-      for (const v of vendors) {
-        for (const t of displayTypes) headerRow.push(`${v.nombre} - ${t}`);
-      }
-    } else {
-      for (const v of vendors) {
-        headerRow.push(`${v.nombre} - prefix`);
-        for (const t of types) headerRow.push(`${v.nombre} - ${t} rate`);
-      }
-    }
-    if (hasExtra && useNewFormat) {
-      headerRow.push("LCR Vendor");
-      for (const t of displayTypes) headerRow.push(`${t} + fees`);
-    }
+    const headerRow = [...QUOTATION_EXPORT_HEADERS];
     const dataRows = rows.map((row) => {
-      const typeCol = hasLineType ? (row.lineType ?? row.type ?? "") : (row.type ?? "");
-      const r: (string | number)[] = useNewFormat && hasLineType ? [row.country, typeCol] : useNewFormat ? [row.country] : [row.country, typeCol];
-      if (useDisplayColumns) {
-        for (const col of displayColumns!) {
-          const cell = row.byVendor?.[col.vendorId] as CellByType | undefined;
-          const c = cell?.[col.rateType];
-          const val = c?.rate ?? "";
-          r.push(typeof val === "number" ? val : val);
-        }
-      } else {
-      for (const v of vendors) {
-        const cell = row.byVendor?.[v.id];
-        const hasMultiType = cell && ((cell as CellByType)["International"] !== undefined || (cell as CellByType)["mobile"] !== undefined);
-        if (useVendorTypeColumns) {
-          for (const t of displayTypes) {
-            const c = hasMultiType && cell ? (cell as CellByType)[t] : cell ? { rate: (cell as { rate?: number }).rate } : undefined;
-            const val = c?.rate ?? "";
-            r.push(typeof val === "number" ? val : val);
-          }
-        } else if (useNewFormat && hasMultiType) {
-          const byType = cell as CellByType;
-          const allPrefixes = types.flatMap((t) => (byType[t]?.prefixes ?? []));
-          r.push(truncateForExcel([...new Set(allPrefixes)].join(", ")));
-          for (const t of types) {
-            const c = (byType as CellByType)[t];
-            const val = c?.rate ?? "";
-            r.push(typeof val === "number" ? val : val);
-          }
-        } else {
-          const c = cell as { prefixes?: string[]; rate?: number; ratePlusExtra?: number | null } | undefined;
-          const prefixStr = truncateForExcel(c?.prefixes?.join(", ") ?? "");
-          const rateVal = c?.rate ?? "";
-          r.push(prefixStr, typeof rateVal === "number" ? rateVal : rateVal);
+      let bestRate: number | null = null;
+      let bestRateType: string = "";
+      const colsToCheck = displayColumns?.length
+        ? displayColumns
+        : vendors.flatMap((v) => displayTypes.map((t) => ({ vendorId: v.id, rateType: t })));
+      for (const col of colsToCheck) {
+        const cell = row.byVendor?.[col.vendorId] as CellByType | undefined;
+        const hasMultiType = cell && (cell["International"] !== undefined || cell["mobile"] !== undefined);
+        const c = hasMultiType && cell ? cell[col.rateType] : cell ? { rate: (cell as { rate?: number }).rate, ratePlusExtra: (cell as { ratePlusExtra?: number | null }).ratePlusExtra } : undefined;
+        const rateVal = c?.ratePlusExtra ?? c?.rate;
+        if (typeof rateVal === "number" && rateVal >= 0 && (bestRate == null || rateVal < bestRate)) {
+          bestRate = rateVal;
+          bestRateType = col.rateType;
         }
       }
-      }
-      if (hasExtra && useNewFormat) {
-        const best = getBestVendorForRow(row, vendors, displayTypes, displayColumns ?? undefined);
-        r.push(best?.nombre ?? "");
-        if (best) {
-          const cell = row.byVendor?.[best.id] as CellByType | undefined;
-          const hasMultiType = cell && (cell["International"] !== undefined || cell["mobile"] !== undefined);
-          for (const t of displayTypes) {
-            const c = hasMultiType && cell ? cell[t] : cell ? { rate: (cell as { rate?: number }).rate, ratePlusExtra: (cell as { ratePlusExtra?: number | null }).ratePlusExtra } : undefined;
-            const val = c?.ratePlusExtra ?? c?.rate ?? "";
-            r.push(typeof val === "number" ? val : val);
-          }
-        } else {
-          for (const _ of displayTypes) r.push("");
-        }
-      }
-      return r;
+      const type = row.lineType ?? row.type ?? "";
+      return [
+        row.country,
+        type,
+        bestRate ?? "",
+        effectiveDate,
+        initialIncrement,
+        nextIncrement,
+      ];
     });
     const ws = XLSX.utils.aoa_to_sheet([headerRow, ...dataRows]);
     const wb = XLSX.utils.book_new();
