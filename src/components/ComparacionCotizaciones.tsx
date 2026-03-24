@@ -25,7 +25,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { roundUpTo3Decimals, formatRate, formatPercent } from "@/lib/utils";
+import { roundUpTo3Decimals, formatRate, formatRateFull, formatMarginAmount, formatPercent } from "@/lib/utils";
 import { SortableNativeTh } from "@/components/ui/sortable-native-th";
 import { cycleSort, compareText, compareNumber, type SortState } from "@/lib/tableSort";
 
@@ -111,7 +111,8 @@ interface SavedQuotation {
     rateTypes?: string[];
     extra?: { countries: string[]; value: number };
     marginFee?: { value: number; mode: "percentage" | "fixed" };
-    psfFee?: { value: number; mode: "percentage" | "fixed" };
+    /** PSF is always fixed; optional `mode` may exist on legacy snapshots. */
+    psfFee?: { value: number; mode?: "percentage" | "fixed" };
     markupFee?: { value: number; mode: "percentage" | "fixed" };
     displayRateTypes?: string[];
     displayColumns?: { vendorId: string; rateType: string }[];
@@ -137,11 +138,10 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
   const [columnsOpen, setColumnsOpen] = useState(false);
   const [countriesOpen, setCountriesOpen] = useState(false);
   const [psfFeeInput, setPsfFeeInput] = useState("");
-  const [psfFeeMode, setPsfFeeMode] = useState<"percentage" | "fixed">("percentage");
   const [markupFeeInput, setMarkupFeeInput] = useState("");
   const [markupFeeMode, setMarkupFeeMode] = useState<"percentage" | "fixed">("percentage");
   const [appliedFees, setAppliedFees] = useState<{
-    psfFee: { value: number; mode: "percentage" | "fixed" } | null;
+    psfFee: { value: number; mode?: "percentage" | "fixed" } | null;
     markupFee: { value: number; mode: "percentage" | "fixed" } | null;
   } | null>(null);
   const [countriesFromDb, setCountriesFromDb] = useState<{ id: string; nombre: string }[]>([]);
@@ -627,7 +627,6 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
       setSelectedCountries(new Set(uniqueCountries));
       if (snap.psfFee) {
         setPsfFeeInput(String(snap.psfFee.value));
-        setPsfFeeMode(snap.psfFee.mode);
       }
       if (snap.markupFee) {
         setMarkupFeeInput(String(snap.markupFee.value));
@@ -724,7 +723,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
       return;
     }
     setAppliedFees({
-      psfFee: hasPsf ? { value: psfVal, mode: psfFeeMode } : null,
+      psfFee: hasPsf ? { value: psfVal } : null,
       markupFee: hasMarkup ? { value: markupVal, mode: markupFeeMode } : null,
     });
     setHasApplied(true);
@@ -921,7 +920,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                   const n = parseFloat(rawSellRate.replace(",", "."));
                   if (!Number.isNaN(n)) return n;
                 }
-                return defaultSellFromCost(cost);
+                return defaultSellFromRate(selectedRate!, cost);
               })()
             : null;
         const network = row.networkLabel ?? "";
@@ -1184,15 +1183,30 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
   const getPsfAmount = (rate: number): number => {
     if (!appliedFees?.psfFee || appliedFees.psfFee.value === 0) return 0;
     const p = appliedFees.psfFee;
+    // Legacy snapshots may still have mode "percentage"; new saves are fixed only.
     return p.mode === "percentage" ? rate * (p.value / 100) : p.value;
   };
 
-  /** Default sell rate from cost when no manual sell override: fixed adds to cost; % applies on cost. */
-  const defaultSellFromCost = useCallback(
-    (cost: number): number => {
+  /**
+   * Default sell when no manual override: markup applies on the selected rate (fixed adds; % on rate).
+   * Without markup, sell defaults to cost (rate + PSF).
+   */
+  const defaultSellFromRate = useCallback(
+    (rate: number, cost: number): number => {
       const m = appliedFees?.markupFee;
       if (!m || m.value === 0) return cost;
-      return m.mode === "fixed" ? cost + m.value : cost * (1 + m.value / 100);
+      return m.mode === "fixed" ? rate + m.value : rate * (1 + m.value / 100);
+    },
+    [appliedFees]
+  );
+
+  /** Incremental markup on the selected rate (fixed value, or rate × %). */
+  const getMarkupAmountOnRate = useCallback(
+    (rate: number | null): number | null => {
+      if (rate == null) return null;
+      const m = appliedFees?.markupFee;
+      if (!m || m.value === 0) return null;
+      return m.mode === "fixed" ? m.value : rate * (m.value / 100);
     },
     [appliedFees]
   );
@@ -1246,13 +1260,14 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                   const n = parseFloat(rawSellRate.replace(",", "."));
                   if (!Number.isNaN(n)) return n;
                 }
-                return defaultSellFromCost(cost);
+                return defaultSellFromRate(selectedRate, cost);
               })()
             : null;
         const netMargin =
           effectiveSellRate != null && cost != null ? effectiveSellRate - cost : null;
         const marginOnCostPct =
           netMargin != null && cost != null && cost > 0 ? (netMargin / cost) * 100 : null;
+        const markupAmount = getMarkupAmountOnRate(selectedRate);
         const lcrLabel = best.vendorName && best.rateType ? `${best.vendorName} - ${best.rateType}` : "";
         let selectedLabel = "";
         if (selectedKey) {
@@ -1269,6 +1284,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
           selectedRate,
           psfAmount,
           cost,
+          markupAmount,
           netMargin,
           marginOnCostPct,
           effectiveSellRate,
@@ -1283,6 +1299,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
       if (key === "selRate") return compareNumber(da.selectedRate, db.selectedRate);
       if (key === "psf") return compareNumber(da.psfAmount, db.psfAmount);
       if (key === "cost") return compareNumber(da.cost, db.cost);
+      if (key === "markupAmt") return compareNumber(da.markupAmount, db.markupAmount);
       if (key === "margin") return compareNumber(da.netMargin, db.netMargin);
       if (key === "marginPct") return compareNumber(da.marginOnCostPct, db.marginOnCostPct);
       if (key === "sellRate") return compareNumber(da.effectiveSellRate, db.effectiveSellRate);
@@ -1296,7 +1313,8 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
       selectedColumnKeyPerRow,
       sellRatePerRow,
       appliedFees,
-      defaultSellFromCost,
+      defaultSellFromRate,
+      getMarkupAmountOnRate,
       vendorListForTable,
     ],
   );
@@ -1566,29 +1584,9 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                 inputMode="decimal"
                 value={psfFeeInput}
                 onChange={(e) => handleFeeInputChange(setPsfFeeInput, e)}
-                className="w-16 h-8 text-xs font-mono px-2"
+                className="w-20 h-8 text-xs font-mono px-2"
+                title="Fixed amount added to rate"
               />
-              <div className="flex rounded-md border border-border overflow-hidden shrink-0">
-                <button
-                  type="button"
-                  onClick={() => setPsfFeeMode("percentage")}
-                  className={`px-2 py-1 text-xs font-medium transition-colors ${
-                    psfFeeMode === "percentage" ? "bg-primary text-primary-foreground" : "bg-muted/50 text-muted-foreground hover:bg-muted"
-                  }`}
-                >
-                  %
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setPsfFeeMode("fixed")}
-                  className={`px-2 py-1 text-xs font-medium transition-colors border-l border-border flex items-center justify-center ${
-                    psfFeeMode === "fixed" ? "bg-primary text-primary-foreground" : "bg-muted/50 text-muted-foreground hover:bg-muted"
-                  }`}
-                  title="Fixed"
-                >
-                  <DollarSign className="w-3 h-3" />
-                </button>
-              </div>
             </div>
             <div className="flex items-center gap-1.5 h-8">
               <Label className="text-xs shrink-0 whitespace-nowrap text-muted-foreground w-14 text-right">Markup</Label>
@@ -1979,6 +1977,15 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                   </SortableNativeTh>
                   <SortableNativeTh
                     rowSpan={2}
+                    sortKey="markupAmt"
+                    sort={quotationTableSort}
+                    onSort={(k) => setQuotationTableSort((s) => cycleSort(s, k))}
+                    className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground bg-muted/50 border-l border-border min-w-[5rem]"
+                  >
+                    Markup
+                  </SortableNativeTh>
+                  <SortableNativeTh
+                    rowSpan={2}
                     sortKey="margin"
                     sort={quotationTableSort}
                     onSort={(k) => setQuotationTableSort((s) => cycleSort(s, k))}
@@ -2025,7 +2032,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                 {displayQuotationRows.length === 0 ? (
                   <tr>
                     <td
-                      colSpan={3 + selectedColumnsList.length + 9}
+                      colSpan={3 + selectedColumnsList.length + 10}
                       className="px-4 py-8 text-center text-muted-foreground"
                     >
                       {search ? (
@@ -2113,7 +2120,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                               className="px-4 py-2.5 border-l-2 border-border bg-card/50 min-w-[5.5rem]"
                             >
                               {rate != null ? (
-                                <span className="font-mono text-foreground">{formatRate(rate)}</span>
+                                <span className="font-mono text-foreground">{formatRateFull(rate)}</span>
                               ) : (
                                 <span className="text-muted-foreground italic">—</span>
                               )}
@@ -2139,7 +2146,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                                     const n = parseFloat(rawSellRate.replace(",", "."));
                                     if (!Number.isNaN(n)) return n;
                                   }
-                                  return defaultSellFromCost(cost);
+                                  return defaultSellFromRate(selectedRate!, cost);
                                 })()
                               : null;
                           const netMargin =
@@ -2150,6 +2157,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                             netMargin != null && cost != null && cost > 0
                               ? (netMargin / cost) * 100
                               : null;
+                          const markupAmount = getMarkupAmountOnRate(selectedRate);
                           return (
                             <>
                               <td className="px-4 py-2.5 border-l-2 border-border bg-card/50 font-medium">
@@ -2157,7 +2165,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                               </td>
                               <td className="px-4 py-2.5 font-mono border-l border-border bg-card/50 min-w-[5rem]">
                                 {bestRate != null ? (
-                                  <span className="text-foreground">{formatRate(bestRate)}</span>
+                                  <span className="text-foreground">{formatRateFull(bestRate)}</span>
                                 ) : (
                                   <span className="text-muted-foreground italic">—</span>
                                 )}
@@ -2187,21 +2195,28 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                               </td>
                               <td className="px-4 py-2.5 font-mono border-l border-border bg-card/50 min-w-[5rem]">
                                 {selectedRate != null ? (
-                                  <span className="text-foreground">{formatRate(selectedRate)}</span>
+                                  <span className="text-foreground">{formatRateFull(selectedRate)}</span>
                                 ) : (
                                   <span className="text-muted-foreground italic">—</span>
                                 )}
                               </td>
                               <td className="px-4 py-2.5 font-mono border-l border-border bg-muted/30 min-w-[6rem]">
                                 {psfAmount != null ? (
-                                  <span className="text-foreground">{formatRate(psfAmount)}</span>
+                                  <span className="text-foreground">{formatRateFull(psfAmount)}</span>
                                 ) : (
                                   <span className="text-muted-foreground italic">—</span>
                                 )}
                               </td>
                               <td className="px-4 py-2.5 font-mono border-l border-border bg-muted/30 min-w-[5rem]">
                                 {cost != null ? (
-                                  <span className="text-foreground">{formatRate(cost)}</span>
+                                  <span className="text-foreground">{formatRateFull(cost)}</span>
+                                ) : (
+                                  <span className="text-muted-foreground italic">—</span>
+                                )}
+                              </td>
+                              <td className="px-4 py-2.5 font-mono border-l border-border bg-muted/30 min-w-[5rem]">
+                                {markupAmount != null ? (
+                                  <span className="text-foreground">{formatRateFull(markupAmount)}</span>
                                 ) : (
                                   <span className="text-muted-foreground italic">—</span>
                                 )}
@@ -2217,7 +2232,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                                           : "text-foreground"
                                     }
                                   >
-                                    {formatRate(netMargin)}
+                                    {formatMarginAmount(netMargin)}
                                   </span>
                                 ) : (
                                   <span className="text-muted-foreground italic">—</span>
@@ -2234,7 +2249,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                                           : "text-foreground"
                                     }
                                   >
-                                    {formatPercent(marginOnCostPct)}
+                                    {formatPercent(marginOnCostPct, 2)}
                                   </span>
                                 ) : (
                                   <span className="text-muted-foreground italic">—</span>
@@ -2245,7 +2260,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                                   <Input
                                     type="text"
                                     inputMode="decimal"
-                                    value={sellRatePerRow[rowKey] ?? formatRate(defaultSellFromCost(cost))}
+                                    value={sellRatePerRow[rowKey] ?? formatRate(defaultSellFromRate(selectedRate!, cost))}
                                     onChange={(e) => {
                                       const v = e.target.value;
                                       if (v === "" || /^-?\d*[,.]?\d*$/.test(v)) {
@@ -2257,7 +2272,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                                       if (v === "")
                                         setSellRatePerRow((prev) => ({
                                           ...prev,
-                                          [rowKey]: formatRate(defaultSellFromCost(cost)),
+                                          [rowKey]: formatRate(defaultSellFromRate(selectedRate!, cost)),
                                         }));
                                     }}
                                     className="h-8 text-xs font-mono w-full min-w-0"

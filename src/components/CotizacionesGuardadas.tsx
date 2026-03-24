@@ -62,7 +62,7 @@ interface SavedQuotation {
     rateTypes?: string[];
     extra?: { countries: string[]; value: number };
     marginFee?: { value: number; mode: "percentage" | "fixed" };
-    psfFee?: { value: number; mode: "percentage" | "fixed" };
+    psfFee?: { value: number; mode?: "percentage" | "fixed" };
     markupFee?: { value: number; mode: "percentage" | "fixed" };
     displayRateTypes?: string[];
     displayColumns?: { vendorId: string; rateType: string }[];

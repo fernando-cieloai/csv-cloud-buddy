@@ -41,6 +41,9 @@ type MasterListRow = {
 
 const PAGE_SIZE = 20;
 
+/** PostgREST/Supabase returns at most this many rows per request unless paginated. */
+const FETCH_CHUNK = 1000;
+
 const formatDate = (d: string | null) => (d ? new Date(d).toLocaleDateString() : "—");
 
 const MasterList = () => {
@@ -55,17 +58,42 @@ const MasterList = () => {
 
   const fetchData = async () => {
     setLoading(true);
-    const { data, error } = await supabase
-      .from("country_regions")
-      .select("id, region, region_code, effective_date, valid_to, date_added, countries(nombre)")
-      .order("region")
-      .order("region_code");
+    const accumulated: {
+      id: string;
+      region: string;
+      region_code: string;
+      effective_date: string | null;
+      valid_to: string | null;
+      date_added: string | null;
+      countries: { nombre: string } | null;
+    }[] = [];
 
-    if (error) {
+    let from = 0;
+    let fetchError: Error | null = null;
+
+    while (true) {
+      const { data, error } = await supabase
+        .from("country_regions")
+        .select("id, region, region_code, effective_date, valid_to, date_added, countries(nombre)")
+        .order("region")
+        .order("region_code")
+        .range(from, from + FETCH_CHUNK - 1);
+
+      if (error) {
+        fetchError = new Error(error.message);
+        break;
+      }
+      const batch = data ?? [];
+      accumulated.push(...batch);
+      if (batch.length < FETCH_CHUNK) break;
+      from += FETCH_CHUNK;
+    }
+
+    if (fetchError) {
       setRows([]);
     } else {
       setRows(
-        (data ?? []).map((r) => ({
+        accumulated.map((r) => ({
           id: r.id,
           country_name: (r.countries as { nombre: string } | null)?.nombre ?? "",
           region: r.region,
