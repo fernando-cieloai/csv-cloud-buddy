@@ -112,6 +112,7 @@ interface SavedQuotation {
     extra?: { countries: string[]; value: number };
     marginFee?: { value: number; mode: "percentage" | "fixed" };
     psfFee?: { value: number; mode: "percentage" | "fixed" };
+    markupFee?: { value: number; mode: "percentage" | "fixed" };
     displayRateTypes?: string[];
     displayColumns?: { vendorId: string; rateType: string }[];
     effectiveDate?: string;
@@ -137,8 +138,11 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
   const [countriesOpen, setCountriesOpen] = useState(false);
   const [psfFeeInput, setPsfFeeInput] = useState("");
   const [psfFeeMode, setPsfFeeMode] = useState<"percentage" | "fixed">("percentage");
+  const [markupFeeInput, setMarkupFeeInput] = useState("");
+  const [markupFeeMode, setMarkupFeeMode] = useState<"percentage" | "fixed">("percentage");
   const [appliedFees, setAppliedFees] = useState<{
     psfFee: { value: number; mode: "percentage" | "fixed" } | null;
+    markupFee: { value: number; mode: "percentage" | "fixed" } | null;
   } | null>(null);
   const [countriesFromDb, setCountriesFromDb] = useState<{ id: string; nombre: string }[]>([]);
   const [countryGroupsFromDb, setCountryGroupsFromDb] = useState<{ country_id: string; group_id: string }[]>([]);
@@ -625,7 +629,11 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
         setPsfFeeInput(String(snap.psfFee.value));
         setPsfFeeMode(snap.psfFee.mode);
       }
-      setAppliedFees({ psfFee: snap.psfFee ?? null });
+      if (snap.markupFee) {
+        setMarkupFeeInput(String(snap.markupFee.value));
+        setMarkupFeeMode(snap.markupFee.mode);
+      }
+      setAppliedFees({ psfFee: snap.psfFee ?? null, markupFee: snap.markupFee ?? null });
       if (snap.displayColumns?.length) {
         setSelectedColumnPairs(new Set(snap.displayColumns.map((c: { vendorId: string; rateType: string }) => `${c.vendorId}\t${c.rateType}`)));
       } else {
@@ -709,12 +717,15 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
   const handleApply = () => {
     const psfVal = parseFloat(psfFeeInput.replace(",", "."));
     const hasPsf = !Number.isNaN(psfVal);
+    const markupVal = parseFloat(markupFeeInput.replace(",", "."));
+    const hasMarkup = !Number.isNaN(markupVal);
     if (selectedColumnPairs.size === 0 || effectiveCountryFilter.size === 0) {
       toast.error("Select at least one country (or group) and one vendor-rate comparison");
       return;
     }
     setAppliedFees({
       psfFee: hasPsf ? { value: psfVal, mode: psfFeeMode } : null,
+      markupFee: hasMarkup ? { value: markupVal, mode: markupFeeMode } : null,
     });
     setHasApplied(true);
     setPage(1);
@@ -910,12 +921,12 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                   const n = parseFloat(rawSellRate.replace(",", "."));
                   if (!Number.isNaN(n)) return n;
                 }
-                return cost;
+                return defaultSellFromCost(cost);
               })()
             : null;
         const network = row.networkLabel ?? "";
         return [
-          row.country,
+          (row.country ?? "").toUpperCase(),
           network,
           effectiveSellRate != null ? roundUpTo3Decimals(effectiveSellRate) : "",
           effectiveDate,
@@ -1024,6 +1035,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
           initialIncrement: snap.initialIncrement ?? QUOTATION_DEFAULTS.initialIncrement,
           nextIncrement: snap.nextIncrement ?? QUOTATION_DEFAULTS.nextIncrement,
           ...(appliedFees?.psfFee ? { psfFee: appliedFees.psfFee } : {}),
+          ...(appliedFees?.markupFee ? { markupFee: appliedFees.markupFee } : {}),
         };
         const { error } = await supabase
           .from("saved_quotations")
@@ -1054,6 +1066,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
         initialIncrement: QUOTATION_DEFAULTS.initialIncrement,
         nextIncrement: QUOTATION_DEFAULTS.nextIncrement,
         ...(appliedFees?.psfFee ? { psfFee: appliedFees.psfFee } : {}),
+        ...(appliedFees?.markupFee ? { markupFee: appliedFees.markupFee } : {}),
         rows: rowsToSave.map((row) => ({
           country: row.country,
           lineType: row.networkLabel,
@@ -1174,6 +1187,16 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
     return p.mode === "percentage" ? rate * (p.value / 100) : p.value;
   };
 
+  /** Default sell rate from cost when no manual sell override: fixed adds to cost; % applies on cost. */
+  const defaultSellFromCost = useCallback(
+    (cost: number): number => {
+      const m = appliedFees?.markupFee;
+      if (!m || m.value === 0) return cost;
+      return m.mode === "fixed" ? cost + m.value : cost * (1 + m.value / 100);
+    },
+    [appliedFees]
+  );
+
   const getRowKey = (row: { country: string; networkLabel: string }) => `${row.country}\t${row.networkLabel}`;
 
   const getAllPrefixesForRow = (row: { byVendor: Map<string, Partial<Record<RateType, VendorCellByType>>> }): string[] => {
@@ -1223,7 +1246,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                   const n = parseFloat(rawSellRate.replace(",", "."));
                   if (!Number.isNaN(n)) return n;
                 }
-                return cost;
+                return defaultSellFromCost(cost);
               })()
             : null;
         const netMargin =
@@ -1273,6 +1296,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
       selectedColumnKeyPerRow,
       sellRatePerRow,
       appliedFees,
+      defaultSellFromCost,
       vendorListForTable,
     ],
   );
@@ -1559,6 +1583,37 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                   onClick={() => setPsfFeeMode("fixed")}
                   className={`px-2 py-1 text-xs font-medium transition-colors border-l border-border flex items-center justify-center ${
                     psfFeeMode === "fixed" ? "bg-primary text-primary-foreground" : "bg-muted/50 text-muted-foreground hover:bg-muted"
+                  }`}
+                  title="Fixed"
+                >
+                  <DollarSign className="w-3 h-3" />
+                </button>
+              </div>
+            </div>
+            <div className="flex items-center gap-1.5 h-8">
+              <Label className="text-xs shrink-0 whitespace-nowrap text-muted-foreground w-14 text-right">Markup</Label>
+              <Input
+                type="text"
+                inputMode="decimal"
+                value={markupFeeInput}
+                onChange={(e) => handleFeeInputChange(setMarkupFeeInput, e)}
+                className="w-16 h-8 text-xs font-mono px-2"
+              />
+              <div className="flex rounded-md border border-border overflow-hidden shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setMarkupFeeMode("percentage")}
+                  className={`px-2 py-1 text-xs font-medium transition-colors ${
+                    markupFeeMode === "percentage" ? "bg-primary text-primary-foreground" : "bg-muted/50 text-muted-foreground hover:bg-muted"
+                  }`}
+                >
+                  %
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMarkupFeeMode("fixed")}
+                  className={`px-2 py-1 text-xs font-medium transition-colors border-l border-border flex items-center justify-center ${
+                    markupFeeMode === "fixed" ? "bg-primary text-primary-foreground" : "bg-muted/50 text-muted-foreground hover:bg-muted"
                   }`}
                   title="Fixed"
                 >
@@ -2084,7 +2139,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                                     const n = parseFloat(rawSellRate.replace(",", "."));
                                     if (!Number.isNaN(n)) return n;
                                   }
-                                  return cost;
+                                  return defaultSellFromCost(cost);
                                 })()
                               : null;
                           const netMargin =
@@ -2190,7 +2245,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                                   <Input
                                     type="text"
                                     inputMode="decimal"
-                                    value={sellRatePerRow[rowKey] ?? formatRate(cost)}
+                                    value={sellRatePerRow[rowKey] ?? formatRate(defaultSellFromCost(cost))}
                                     onChange={(e) => {
                                       const v = e.target.value;
                                       if (v === "" || /^-?\d*[,.]?\d*$/.test(v)) {
@@ -2199,7 +2254,11 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                                     }}
                                     onBlur={(e) => {
                                       const v = e.target.value.trim();
-                                      if (v === "") setSellRatePerRow((prev) => ({ ...prev, [rowKey]: formatRate(cost) }));
+                                      if (v === "")
+                                        setSellRatePerRow((prev) => ({
+                                          ...prev,
+                                          [rowKey]: formatRate(defaultSellFromCost(cost)),
+                                        }));
                                     }}
                                     className="h-8 text-xs font-mono w-full min-w-0"
                                   />

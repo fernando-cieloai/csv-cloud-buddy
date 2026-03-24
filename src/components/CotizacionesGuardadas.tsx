@@ -63,6 +63,7 @@ interface SavedQuotation {
     extra?: { countries: string[]; value: number };
     marginFee?: { value: number; mode: "percentage" | "fixed" };
     psfFee?: { value: number; mode: "percentage" | "fixed" };
+    markupFee?: { value: number; mode: "percentage" | "fixed" };
     displayRateTypes?: string[];
     displayColumns?: { vendorId: string; rateType: string }[];
     effectiveDate?: string;
@@ -324,7 +325,7 @@ export default function CotizacionesGuardadas() {
       }
       const type = row.lineType ?? row.type ?? "";
       return [
-        row.country,
+        (row.country ?? "").toUpperCase(),
         type,
         bestRate != null ? roundUpTo3Decimals(bestRate) : "",
         effectiveDate,
