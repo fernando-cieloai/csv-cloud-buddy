@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect } from "react";
+import { useMemo, useState, useEffect, useCallback } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -20,8 +20,30 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { SortableTableHead } from "@/components/ui/sortable-table-head";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { cycleSort, compareText, compareNumber, type SortState } from "@/lib/tableSort";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { supabase } from "@/integrations/supabase/client";
-import { RefreshCw, Eye, Pencil, Trash2, Plus, Upload, Download } from "lucide-react";
+import {
+  RefreshCw,
+  Eye,
+  Pencil,
+  Trash2,
+  Plus,
+  Upload,
+  Download,
+  MoreVertical,
+  ChevronLeft,
+  ChevronRight,
+  CheckCircle2,
+  AlertTriangle,
+} from "lucide-react";
 import CsvUploader from "@/components/CsvUploader";
 import { downloadVendorTemplate } from "@/lib/vendorTemplate";
 
@@ -38,6 +60,8 @@ const PAGE_SIZE = 10;
 
 const AjustesVendor = () => {
   const [vendors, setVendors] = useState<Vendor[]>([]);
+  /** Vendors that have at least one csv_upload with vendor_id set. */
+  const [vendorIdsWithUpload, setVendorIdsWithUpload] = useState<Set<string>>(() => new Set());
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
   const [selectedVendor, setSelectedVendor] = useState<Vendor | null>(null);
@@ -49,23 +73,70 @@ const AjustesVendor = () => {
   const [formNombre, setFormNombre] = useState("");
   const [formDescripcion, setFormDescripcion] = useState("");
   const [formEstado, setFormEstado] = useState<VendorStatus>("activado");
+  const [vendorSort, setVendorSort] = useState<SortState<"nombre" | "descripcion" | "estado" | "hasFile">>(null);
 
-  const totalPages = Math.max(1, Math.ceil(vendors.length / PAGE_SIZE));
-  const paginatedVendors = vendors.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const sortedVendors = useMemo(() => {
+    if (!vendorSort) return vendors;
+    const { key, dir } = vendorSort;
+    const m = dir === "asc" ? 1 : -1;
+    return [...vendors].sort((a, b) => {
+      let c = 0;
+      if (key === "nombre") c = compareText(a.nombre, b.nombre);
+      else if (key === "descripcion") c = compareText(a.descripcion, b.descripcion);
+      else if (key === "estado") c = compareText(a.estado, b.estado);
+      else {
+        const ha = vendorIdsWithUpload.has(a.id) ? 1 : 0;
+        const hb = vendorIdsWithUpload.has(b.id) ? 1 : 0;
+        c = compareNumber(ha, hb);
+      }
+      return c * m;
+    });
+  }, [vendors, vendorSort, vendorIdsWithUpload]);
+
+  const totalPages = Math.max(1, Math.ceil(sortedVendors.length / PAGE_SIZE));
+  const paginatedVendors = sortedVendors.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
 
   const fetchVendors = async () => {
     setLoading(true);
-    const { data, error } = await supabase
-      .from("vendors")
-      .select("id, nombre, descripcion, estado")
-      .order("nombre");
-    if (!error && data) setVendors(data);
-    setLoading(false);
+    try {
+      const [vendorsRes, uploadsRes] = await Promise.all([
+        supabase.from("vendors").select("id, nombre, descripcion, estado").order("nombre"),
+        supabase.from("csv_uploads").select("vendor_id").not("vendor_id", "is", null),
+      ]);
+      if (!vendorsRes.error && vendorsRes.data) setVendors(vendorsRes.data);
+      else if (vendorsRes.error) console.error(vendorsRes.error);
+      const next = new Set<string>();
+      if (!uploadsRes.error && uploadsRes.data) {
+        for (const r of uploadsRes.data) {
+          if (r.vendor_id) next.add(r.vendor_id);
+        }
+      } else if (uploadsRes.error) console.error(uploadsRes.error);
+      setVendorIdsWithUpload(next);
+    } finally {
+      setLoading(false);
+    }
   };
+
+  const refreshVendorUploadIds = useCallback(async () => {
+    const { data, error } = await supabase
+      .from("csv_uploads")
+      .select("vendor_id")
+      .not("vendor_id", "is", null);
+    if (error) return;
+    const next = new Set<string>();
+    for (const r of data ?? []) {
+      if (r.vendor_id) next.add(r.vendor_id);
+    }
+    setVendorIdsWithUpload(next);
+  }, []);
 
   useEffect(() => {
     fetchVendors();
   }, []);
+
+  useEffect(() => {
+    setPage(1);
+  }, [vendorSort]);
 
   const isReadOnly = mode === "ver";
   const dialogTitle = useMemo(() => {
@@ -182,25 +253,21 @@ const AjustesVendor = () => {
   };
 
   return (
-    <div className="rounded-2xl border border-border bg-card p-8 space-y-6">
-      <div className="flex items-center justify-between gap-4">
-        <div className="space-y-1">
-          <h1 className="text-2xl font-bold text-foreground">
-            Settings · Vendors
-          </h1>
-          <p className="text-sm text-muted-foreground max-w-xl">
-            Manage vendors that provide phone rates. You can create, edit, view
-            details, or delete records. Description is optional and status can be
-            enabled or disabled.
-          </p>
-        </div>
-        <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
-          <DialogTrigger asChild>
-            <Button variant="outline" size="sm" className="h-9 shrink-0 inline-flex items-center gap-2" onClick={openCreateDialog}>
-              <Plus className="w-3.5 h-3.5" />
-              Create vendor
+    <div className="space-y-4">
+      <div className="rounded-lg border border-border bg-card overflow-hidden">
+        <div className="px-6 py-4 border-b border-border bg-muted/30 flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <Button variant="outline" size="sm" className="h-9 rounded-lg" onClick={downloadVendorTemplate}>
+              <Download className="w-3.5 h-3.5 mr-1.5" />
+              Download template
             </Button>
-          </DialogTrigger>
+          </div>
+          <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
+            <DialogTrigger asChild>
+              <Button size="sm" className="h-9 px-4 rounded-lg" onClick={openCreateDialog} aria-label="Create vendor">
+                <Plus className="w-4 h-4" />
+              </Button>
+            </DialogTrigger>
           <DialogContent>
             <DialogHeader>
               <DialogTitle>{dialogTitle}</DialogTitle>
@@ -214,7 +281,7 @@ const AjustesVendor = () => {
                   id="nombre"
                   value={formNombre}
                   onChange={(event) => setFormNombre(event.target.value)}
-                  placeholder="Ej. Telco MX"
+                  placeholder="e.g. Telco MX"
                   required
                   readOnly={isReadOnly}
                 />
@@ -276,76 +343,76 @@ const AjustesVendor = () => {
               </DialogFooter>
             </form>
           </DialogContent>
-        </Dialog>
-      </div>
-
-      {/* Download vendor template - for vendors without a specific format */}
-      <div className="mx-4 mt-4 rounded-xl border border-border bg-card p-4">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div>
-            <p className="text-sm font-medium text-foreground">Vendor rate template</p>
-            <p className="text-xs text-muted-foreground mt-0.5">
-              Use this template for vendors that don&apos;t have a specific format. Contains 3 sheets: International, Origin Based, Local.
-            </p>
-          </div>
-          <Button
-            variant="outline"
-            size="sm"
-            className="shrink-0 inline-flex items-center gap-2"
-            onClick={downloadVendorTemplate}
-          >
-            <Download className="w-4 h-4" />
-            Download template
-          </Button>
+          </Dialog>
         </div>
-      </div>
 
-      <div className="rounded-xl border border-border bg-background/40 mx-4 mt-4 mb-4">
         <Table>
           <TableHeader>
-            <TableRow>
-              <TableHead>Vendor</TableHead>
-              <TableHead>Description</TableHead>
-              <TableHead className="w-32">Status</TableHead>
-              <TableHead className="w-24 text-center">File</TableHead>
-              <TableHead className="w-40 text-right">Actions</TableHead>
+            <TableRow className="border-b border-border hover:bg-transparent">
+              <SortableTableHead
+                sortKey="nombre"
+                sort={vendorSort}
+                onSort={(k) => setVendorSort((s) => cycleSort(s, k as "nombre" | "descripcion" | "estado" | "hasFile"))}
+                className="h-11 px-6 font-medium text-muted-foreground bg-muted/50"
+              >
+                Vendor
+              </SortableTableHead>
+              <SortableTableHead
+                sortKey="descripcion"
+                sort={vendorSort}
+                onSort={(k) => setVendorSort((s) => cycleSort(s, k as "nombre" | "descripcion" | "estado" | "hasFile"))}
+                className="h-11 px-6 font-medium text-muted-foreground bg-muted/50"
+              >
+                Description
+              </SortableTableHead>
+              <SortableTableHead
+                sortKey="estado"
+                sort={vendorSort}
+                onSort={(k) => setVendorSort((s) => cycleSort(s, k as "nombre" | "descripcion" | "estado" | "hasFile"))}
+                className="h-11 px-6 font-medium text-muted-foreground bg-muted/50"
+              >
+                Status
+              </SortableTableHead>
+              <SortableTableHead
+                sortKey="hasFile"
+                sort={vendorSort}
+                onSort={(k) => setVendorSort((s) => cycleSort(s, k as "nombre" | "descripcion" | "estado" | "hasFile"))}
+                className="h-11 w-[4.5rem] px-2 font-medium text-muted-foreground bg-muted/50"
+                align="center"
+              >
+                File
+              </SortableTableHead>
+              <TableHead className="w-12 text-right bg-muted/50"></TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {loading ? (
-              <TableRow>
-                <TableCell
-                  colSpan={5}
-                  className="text-center py-12 text-sm text-muted-foreground"
-                >
+              <TableRow className="border-b border-border hover:bg-transparent">
+                <TableCell colSpan={5} className="text-center py-12 text-muted-foreground px-6">
                   <RefreshCw className="w-4 h-4 animate-spin inline-block mr-2" />
                   Loading vendors…
                 </TableCell>
               </TableRow>
             ) : vendors.length === 0 ? (
-              <TableRow>
-                <TableCell
-                  colSpan={5}
-                  className="text-center text-sm text-muted-foreground py-8"
-                >
-                  No vendors yet. Create the first one with the
-                  &quot;Create vendor&quot; button.
+              <TableRow className="border-b border-border hover:bg-transparent">
+                <TableCell colSpan={5} className="text-center py-12 text-muted-foreground px-6">
+                  No vendors yet. Create the first one with the + button.
                 </TableCell>
               </TableRow>
             ) : (
               paginatedVendors.map((vendor) => (
-                <TableRow key={vendor.id}>
-                  <TableCell className="font-medium">
+                <TableRow key={vendor.id} className="border-b border-border">
+                  <TableCell className="font-medium px-6 py-4">
                     {vendor.nombre}
                   </TableCell>
-                  <TableCell className="text-muted-foreground">
+                  <TableCell className="text-muted-foreground px-6 py-4">
                     {vendor.descripcion ?? (
                       <span className="italic text-xs text-muted-foreground">
                         No description
                       </span>
                     )}
                   </TableCell>
-                  <TableCell>
+                  <TableCell className="px-6 py-4">
                     <Badge
                       variant={
                         vendor.estado === "activado" ? "default" : "outline"
@@ -361,79 +428,94 @@ const AjustesVendor = () => {
                         : "Disabled"}
                     </Badge>
                   </TableCell>
-                  <TableCell className="text-center">
+                  <TableCell className="px-2 py-4 text-center align-middle">
+                    {vendorIdsWithUpload.has(vendor.id) ? (
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <span
+                            className="inline-flex text-emerald-600 dark:text-emerald-400"
+                            aria-label="Rate file uploaded"
+                          >
+                            <CheckCircle2 className="w-4 h-4" />
+                          </span>
+                        </TooltipTrigger>
+                        <TooltipContent>Rate file uploaded</TooltipContent>
+                      </Tooltip>
+                    ) : (
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <span
+                            className="inline-flex text-amber-600 dark:text-amber-500"
+                            aria-label="No rate file uploaded"
+                          >
+                            <AlertTriangle className="w-4 h-4" />
+                          </span>
+                        </TooltipTrigger>
+                        <TooltipContent>No rate file uploaded</TooltipContent>
+                      </Tooltip>
+                    )}
+                  </TableCell>
+                  <TableCell className="text-right px-6 py-4">
                     <Dialog open={uploadDialogVendor?.id === vendor.id} onOpenChange={(open) => !open && setUploadDialogVendor(null)}>
-                      <DialogTrigger asChild>
-                        <Button
-                          size="icon"
-                          variant="ghost"
-                          className="h-8 w-8"
-                          onClick={() => setUploadDialogVendor(vendor)}
-                          aria-label={`Upload file for ${vendor.nombre}`}
-                          disabled={vendor.estado === "desactivado"}
-                        >
-                          <Upload className="w-4 h-4" />
-                        </Button>
-                      </DialogTrigger>
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button size="icon" variant="ghost" className="h-8 w-8" aria-label="Actions">
+                            <MoreVertical className="w-4 h-4" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          <DropdownMenuItem onClick={() => openViewDialog(vendor)}>
+                            <Eye className="w-4 h-4 mr-2" />
+                            View
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => openEditDialog(vendor)}>
+                            <Pencil className="w-4 h-4 mr-2" />
+                            Edit
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            onClick={() => setUploadDialogVendor(vendor)}
+                            disabled={vendor.estado === "desactivado"}
+                          >
+                            <Upload className="w-4 h-4 mr-2" />
+                            Upload file
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => handleDelete(vendor)} className="text-destructive focus:text-destructive">
+                            <Trash2 className="w-4 h-4 mr-2" />
+                            Delete
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
                       <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
                         <DialogHeader>
                           <DialogTitle>Upload rates for {vendor.nombre}</DialogTitle>
                         </DialogHeader>
                         <CsvUploader
                           vendorId={vendor.id}
+                          vendorName={vendor.nombre}
                           compact
-                          onSuccess={() => setUploadDialogVendor(null)}
+                          onSuccess={() => {
+                            void refreshVendorUploadIds();
+                          }}
                         />
                       </DialogContent>
                     </Dialog>
-                  </TableCell>
-                  <TableCell className="text-right space-x-2">
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      className="h-8 w-8"
-                      onClick={() => openViewDialog(vendor)}
-                      aria-label={`View vendor ${vendor.nombre}`}
-                    >
-                      <Eye className="w-4 h-4" />
-                    </Button>
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      className="h-8 w-8"
-                      onClick={() => openEditDialog(vendor)}
-                      aria-label={`Edit vendor ${vendor.nombre}`}
-                    >
-                      <Pencil className="w-4 h-4" />
-                    </Button>
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      className="h-8 w-8 text-destructive hover:text-destructive"
-                      onClick={() => handleDelete(vendor)}
-                      aria-label={`Delete vendor ${vendor.nombre}`}
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </Button>
                   </TableCell>
                 </TableRow>
               ))
             )}
           </TableBody>
         </Table>
-        {vendors.length > 0 && (
-          <div className="flex items-center justify-between px-4 py-3 border-t border-border bg-muted/50 rounded-b-xl text-sm text-muted-foreground">
-            <span>
-              Showing {((page - 1) * PAGE_SIZE) + 1}-{Math.min(page * PAGE_SIZE, vendors.length)} of {vendors.length}
-            </span>
+        {sortedVendors.length > 0 && (
+          <div className="flex items-center justify-between gap-4 px-6 py-3 border-t border-border bg-muted/30 text-sm text-muted-foreground">
+            <span>{Math.min(page * PAGE_SIZE, sortedVendors.length) - (page - 1) * PAGE_SIZE} of {sortedVendors.length} items</span>
             <div className="flex items-center gap-2">
-              <Button variant="outline" size="sm" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1}>
-                Previous
-              </Button>
-              <span className="text-xs">Page {page} of {totalPages}</span>
-              <Button variant="outline" size="sm" onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages}>
-                Next
-              </Button>
+            <span className="min-w-[4rem] text-center">{page} / {totalPages}</span>
+            <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1} aria-label="Previous page">
+              <ChevronLeft className="w-4 h-4" />
+            </Button>
+            <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages} aria-label="Next page">
+              <ChevronRight className="w-4 h-4" />
+            </Button>
             </div>
           </div>
         )}

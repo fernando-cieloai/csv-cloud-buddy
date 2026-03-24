@@ -11,6 +11,7 @@ const navItems = [
   { to: "/vendors", label: "Vendors" },
   { to: "/clients", label: "Clients" },
   { to: "/countries", label: "Countries" },
+  { to: "/master-list", label: "Master List" },
 ] as const;
 
 export const Navbar = () => {

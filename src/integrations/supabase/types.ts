@@ -18,23 +18,39 @@ export type Database = {
         Row: {
           id: string
           nombre: string
-          region_id: string | null
           created_at: string
         }
         Insert: {
           id?: string
           nombre: string
-          region_id?: string | null
           created_at?: string
         }
         Update: {
           id?: string
           nombre?: string
-          region_id?: string | null
+          created_at?: string
+        }
+        Relationships: []
+      }
+      country_groups: {
+        Row: {
+          country_id: string
+          group_id: string
+          created_at: string
+        }
+        Insert: {
+          country_id: string
+          group_id: string
+          created_at?: string
+        }
+        Update: {
+          country_id?: string
+          group_id?: string
           created_at?: string
         }
         Relationships: [
-          { foreignKeyName: "countries_region_id_fkey"; columns: ["region_id"]; referencedRelation: "regions"; referencedColumns: ["id"] }
+          { foreignKeyName: "country_groups_country_id_fkey"; columns: ["country_id"]; referencedRelation: "countries"; referencedColumns: ["id"] },
+          { foreignKeyName: "country_groups_group_id_fkey"; columns: ["group_id"]; referencedRelation: "groups"; referencedColumns: ["id"] }
         ]
       }
       clients: {
@@ -137,7 +153,7 @@ export type Database = {
           { foreignKeyName: "saved_quotations_client_id_fkey"; columns: ["client_id"]; referencedRelation: "clients"; referencedColumns: ["id"] }
         ]
       }
-      regions: {
+      groups: {
         Row: {
           id: string
           nombre: string

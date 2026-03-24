@@ -1,4 +1,5 @@
 import { useMemo, useState, useEffect } from "react";
+import { Link } from "react-router-dom";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -7,19 +8,12 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Table,
   TableBody,
@@ -28,11 +22,18 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { SortableTableHead } from "@/components/ui/sortable-table-head";
+import { cycleSort, compareText, compareNumber, type SortState } from "@/lib/tableSort";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { supabase } from "@/integrations/supabase/client";
-import { RefreshCw, Globe, MapPin, Eye, Pencil, Trash2, Plus, Upload } from "lucide-react";
-import CountriesFileUploader from "@/components/CountriesFileUploader";
+import { RefreshCw, Globe, MapPin, Eye, Pencil, Trash2, Plus, MoreVertical, ChevronLeft, ChevronRight, Search } from "lucide-react";
 
-type Region = {
+type Group = {
   id: string;
   nombre: string;
   descripcion: string | null;
@@ -41,52 +42,58 @@ type Region = {
 type Country = {
   id: string;
   nombre: string;
-  region_id: string | null;
-  region?: Region | null;
+  groupIds: string[];
 };
 
 const PAGE_SIZE = 10;
 
 const AjustesPaises = () => {
-  const [regions, setRegions] = useState<Region[]>([]);
+  const [groups, setGroups] = useState<Group[]>([]);
   const [countries, setCountries] = useState<Country[]>([]);
   const [loading, setLoading] = useState(true);
-  const [regionPage, setRegionPage] = useState(1);
+  const [groupPage, setGroupPage] = useState(1);
   const [countryPage, setCountryPage] = useState(1);
+  const [mainTab, setMainTab] = useState<"groups" | "countries">("groups");
+  const [groupTableSearch, setGroupTableSearch] = useState("");
+  const [countryTableSearch, setCountryTableSearch] = useState("");
+  const [groupSort, setGroupSort] = useState<SortState<"nombre" | "descripcion" | "countries">>(null);
+  const [countrySort, setCountrySort] = useState<SortState<"country" | "groups">>(null);
 
-  // Regions dialog
-  const [selectedRegion, setSelectedRegion] = useState<Region | null>(null);
-  const [regionMode, setRegionMode] = useState<"crear" | "editar" | "ver">("crear");
-  const [isRegionDialogOpen, setIsRegionDialogOpen] = useState(false);
-  const [regionSaving, setRegionSaving] = useState(false);
-  const [formRegionNombre, setFormRegionNombre] = useState("");
-  const [formRegionDescripcion, setFormRegionDescripcion] = useState("");
+  // Groups dialog
+  const [selectedGroup, setSelectedGroup] = useState<Group | null>(null);
+  const [groupMode, setGroupMode] = useState<"crear" | "editar" | "ver">("crear");
+  const [isGroupDialogOpen, setIsGroupDialogOpen] = useState(false);
+  const [groupSaving, setGroupSaving] = useState(false);
+  const [formGroupNombre, setFormGroupNombre] = useState("");
+  const [formGroupDescripcion, setFormGroupDescripcion] = useState("");
+  /** Country IDs to include in the group (create / edit). */
+  const [formGroupCountryIds, setFormGroupCountryIds] = useState<Set<string>>(new Set());
+  const [groupCountrySearch, setGroupCountrySearch] = useState("");
 
-  // Countries dialog
+  // Country view-only dialog
   const [selectedCountry, setSelectedCountry] = useState<Country | null>(null);
-  const [countryMode, setCountryMode] = useState<"crear" | "editar" | "ver">("crear");
   const [isCountryDialogOpen, setIsCountryDialogOpen] = useState(false);
-  const [countrySaving, setCountrySaving] = useState(false);
-  const [formCountryNombre, setFormCountryNombre] = useState("");
-  const [formCountryRegionId, setFormCountryRegionId] = useState<string>("__none__");
 
   const fetchData = async () => {
     setLoading(true);
-    const [regionsRes, countriesRes] = await Promise.all([
-      supabase.from("regions").select("id, nombre, descripcion").order("nombre"),
-      supabase
-        .from("countries")
-        .select("id, nombre, region_id, regions(id, nombre, descripcion)")
-        .order("nombre"),
+    const [groupsRes, countriesRes, cgRes] = await Promise.all([
+      supabase.from("groups").select("id, nombre, descripcion").order("nombre"),
+      supabase.from("countries").select("id, nombre").order("nombre"),
+      supabase.from("country_groups").select("country_id, group_id"),
     ]);
-    if (!regionsRes.error && regionsRes.data) setRegions(regionsRes.data);
-    if (!countriesRes.error && countriesRes.data) {
+    if (!groupsRes.error && groupsRes.data) setGroups(groupsRes.data);
+    if (!countriesRes.error && countriesRes.data && !cgRes.error && cgRes.data) {
+      const cgMap = new Map<string, string[]>();
+      for (const row of cgRes.data) {
+        const list = cgMap.get(row.country_id) ?? [];
+        list.push(row.group_id);
+        cgMap.set(row.country_id, list);
+      }
       setCountries(
         countriesRes.data.map((c) => ({
           id: c.id,
           nombre: c.nombre,
-          region_id: c.region_id,
-          region: Array.isArray(c.regions) ? c.regions[0] : (c.regions as Region | null),
+          groupIds: cgMap.get(c.id) ?? [],
         })),
       );
     }
@@ -97,256 +104,407 @@ const AjustesPaises = () => {
     fetchData();
   }, []);
 
-  const regionById = useMemo(() => {
-    const m = new Map<string, Region>();
-    for (const r of regions) m.set(r.id, r);
+  const groupById = useMemo(() => {
+    const m = new Map<string, Group>();
+    for (const g of groups) m.set(g.id, g);
     return m;
-  }, [regions]);
+  }, [groups]);
 
-  const regionTotalPages = Math.max(1, Math.ceil(regions.length / PAGE_SIZE));
-  const paginatedRegions = regions.slice((regionPage - 1) * PAGE_SIZE, regionPage * PAGE_SIZE);
-  const countryTotalPages = Math.max(1, Math.ceil(countries.length / PAGE_SIZE));
-  const paginatedCountries = countries.slice((countryPage - 1) * PAGE_SIZE, countryPage * PAGE_SIZE);
+  const countriesInGroup = useMemo(() => {
+    const m = new Map<string, Country[]>();
+    for (const c of countries) {
+      for (const gid of c.groupIds) {
+        const list = m.get(gid) ?? [];
+        list.push(c);
+        m.set(gid, list);
+      }
+    }
+    return m;
+  }, [countries]);
 
-  // --- Regions CRUD ---
-  const regionDialogTitle = useMemo(() => {
-    if (regionMode === "crear") return "Create region";
-    if (regionMode === "editar") return "Edit region";
-    return "Region details";
-  }, [regionMode]);
+  const filteredGroups = useMemo(() => {
+    const q = groupTableSearch.trim().toLowerCase();
+    if (!q) return groups;
+    return groups.filter(
+      (g) =>
+        g.nombre.toLowerCase().includes(q) ||
+        (g.descripcion ?? "").toLowerCase().includes(q),
+    );
+  }, [groups, groupTableSearch]);
 
-  const resetRegionForm = () => {
-    setFormRegionNombre("");
-    setFormRegionDescripcion("");
-    setSelectedRegion(null);
-    setRegionMode("crear");
+  const filteredCountries = useMemo(() => {
+    const q = countryTableSearch.trim().toLowerCase();
+    if (!q) return countries;
+    return countries.filter((c) => {
+      if (c.nombre.toLowerCase().includes(q)) return true;
+      return c.groupIds.some((gid) => {
+        const g = groupById.get(gid);
+        return g?.nombre.toLowerCase().includes(q);
+      });
+    });
+  }, [countries, countryTableSearch, groupById]);
+
+  useEffect(() => {
+    setGroupPage(1);
+  }, [groupTableSearch]);
+
+  useEffect(() => {
+    setCountryPage(1);
+  }, [countryTableSearch]);
+
+  useEffect(() => {
+    setGroupPage(1);
+  }, [groupSort]);
+
+  useEffect(() => {
+    setCountryPage(1);
+  }, [countrySort]);
+
+  const sortedFilteredGroups = useMemo(() => {
+    if (!groupSort) return filteredGroups;
+    const { key, dir } = groupSort;
+    const m = dir === "asc" ? 1 : -1;
+    return [...filteredGroups].sort((a, b) => {
+      let c = 0;
+      if (key === "nombre") c = compareText(a.nombre, b.nombre);
+      else if (key === "descripcion") c = compareText(a.descripcion, b.descripcion);
+      else
+        c = compareNumber(
+          (countriesInGroup.get(a.id) ?? []).length,
+          (countriesInGroup.get(b.id) ?? []).length,
+        );
+      return c * m;
+    });
+  }, [filteredGroups, groupSort, countriesInGroup]);
+
+  const sortedFilteredCountries = useMemo(() => {
+    if (!countrySort) return filteredCountries;
+    const { key, dir } = countrySort;
+    const m = dir === "asc" ? 1 : -1;
+    return [...filteredCountries].sort((a, b) => {
+      if (key === "country") return compareText(a.nombre, b.nombre) * m;
+      const groupsA = [...a.groupIds]
+        .map((gid) => groupById.get(gid)?.nombre ?? "")
+        .sort()
+        .join("|");
+      const groupsB = [...b.groupIds]
+        .map((gid) => groupById.get(gid)?.nombre ?? "")
+        .sort()
+        .join("|");
+      return compareText(groupsA, groupsB) * m;
+    });
+  }, [filteredCountries, countrySort, groupById]);
+
+  const groupTotalPages = Math.max(1, Math.ceil(sortedFilteredGroups.length / PAGE_SIZE));
+  const paginatedGroups = sortedFilteredGroups.slice((groupPage - 1) * PAGE_SIZE, groupPage * PAGE_SIZE);
+  const countryTotalPages = Math.max(1, Math.ceil(sortedFilteredCountries.length / PAGE_SIZE));
+  const paginatedCountries = sortedFilteredCountries.slice((countryPage - 1) * PAGE_SIZE, countryPage * PAGE_SIZE);
+
+  // --- Groups CRUD ---
+  const groupDialogTitle = useMemo(() => {
+    if (groupMode === "crear") return "Create group";
+    if (groupMode === "editar") return "Edit group";
+    return "Group details";
+  }, [groupMode]);
+
+  const resetGroupForm = () => {
+    setFormGroupNombre("");
+    setFormGroupDescripcion("");
+    setFormGroupCountryIds(new Set());
+    setGroupCountrySearch("");
+    setSelectedGroup(null);
+    setGroupMode("crear");
   };
 
-  const openCreateRegion = () => {
-    resetRegionForm();
-    setRegionMode("crear");
-    setIsRegionDialogOpen(true);
+  const openCreateGroup = () => {
+    resetGroupForm();
+    setGroupMode("crear");
+    setIsGroupDialogOpen(true);
   };
 
-  const openViewRegion = (r: Region) => {
-    setSelectedRegion(r);
-    setFormRegionNombre(r.nombre);
-    setFormRegionDescripcion(r.descripcion ?? "");
-    setRegionMode("ver");
-    setIsRegionDialogOpen(true);
+  const openViewGroup = (g: Group) => {
+    setSelectedGroup(g);
+    setFormGroupNombre(g.nombre);
+    setFormGroupDescripcion(g.descripcion ?? "");
+    setGroupCountrySearch("");
+    setGroupMode("ver");
+    setIsGroupDialogOpen(true);
   };
 
-  const openEditRegion = (r: Region) => {
-    setSelectedRegion(r);
-    setFormRegionNombre(r.nombre);
-    setFormRegionDescripcion(r.descripcion ?? "");
-    setRegionMode("editar");
-    setIsRegionDialogOpen(true);
+  const openEditGroup = (g: Group) => {
+    setSelectedGroup(g);
+    setFormGroupNombre(g.nombre);
+    setFormGroupDescripcion(g.descripcion ?? "");
+    setGroupCountrySearch("");
+    const ids = new Set(countries.filter((c) => c.groupIds.includes(g.id)).map((c) => c.id));
+    setFormGroupCountryIds(ids);
+    setGroupMode("editar");
+    setIsGroupDialogOpen(true);
   };
 
-  const handleDeleteRegion = async (r: Region) => {
-    if (!window.confirm(`Delete region "${r.nombre}"? Countries will be unassigned.`)) return;
-    const { error } = await supabase.from("regions").delete().eq("id", r.id);
+  const handleDeleteGroup = async (g: Group) => {
+    if (!window.confirm(`Delete group "${g.nombre}"? Countries will be unassigned.`)) return;
+    const { error } = await supabase.from("groups").delete().eq("id", g.id);
     if (error) {
       alert(`Error: ${error.message}`);
       return;
     }
-    setRegions((prev) => prev.filter((x) => x.id !== r.id));
-    if (selectedRegion?.id === r.id) {
-      resetRegionForm();
-      setIsRegionDialogOpen(false);
+    setGroups((prev) => prev.filter((x) => x.id !== g.id));
+    if (selectedGroup?.id === g.id) {
+      resetGroupForm();
+      setIsGroupDialogOpen(false);
     }
     fetchData();
   };
 
-  const handleRegionSubmit = async (e: React.FormEvent) => {
+  const toggleFormGroupCountry = (countryId: string) => {
+    setFormGroupCountryIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(countryId)) next.delete(countryId);
+      else next.add(countryId);
+      return next;
+    });
+  };
+
+  const countriesFilteredForGroupForm = useMemo(() => {
+    const q = groupCountrySearch.trim().toLowerCase();
+    if (!q) return countries;
+    return countries.filter((c) => c.nombre.toLowerCase().includes(q));
+  }, [countries, groupCountrySearch]);
+
+  const handleGroupSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!formRegionNombre.trim()) {
+    const trimmedName = formGroupNombre.trim();
+    if (!trimmedName) {
       alert("Name is required.");
       return;
     }
-    setRegionSaving(true);
-    if (regionMode === "crear") {
+    const nameNorm = trimmedName.toLowerCase();
+    const nameTaken = groups.some(
+      (g) =>
+        g.nombre.trim().toLowerCase() === nameNorm &&
+        (groupMode === "crear" || g.id !== selectedGroup?.id),
+    );
+    if (nameTaken) {
+      alert("A group with this name already exists. Choose a different name.");
+      return;
+    }
+    if (groupMode === "crear" && formGroupCountryIds.size < 2) {
+      alert("Select at least 2 countries to create a group.");
+      return;
+    }
+    setGroupSaving(true);
+    if (groupMode === "crear") {
       const { data, error } = await supabase
-        .from("regions")
-        .insert({ nombre: formRegionNombre.trim(), descripcion: formRegionDescripcion.trim() || null })
+        .from("groups")
+        .insert({ nombre: trimmedName, descripcion: formGroupDescripcion.trim() || null })
         .select("id, nombre, descripcion")
         .single();
       if (error) {
         alert(`Error: ${error.message}`);
-      } else if (data) setRegions((prev) => [data, ...prev]);
-    } else if (regionMode === "editar" && selectedRegion) {
-      const { error } = await supabase
-        .from("regions")
-        .update({
-          nombre: formRegionNombre.trim(),
-          descripcion: formRegionDescripcion.trim() || null,
-        })
-        .eq("id", selectedRegion.id);
-      if (error) alert(`Error: ${error.message}`);
-      else
-        setRegions((prev) =>
-          prev.map((x) =>
-            x.id === selectedRegion.id
-              ? { ...x, nombre: formRegionNombre.trim(), descripcion: formRegionDescripcion.trim() || null }
-              : x,
-          ),
+        setGroupSaving(false);
+        return;
+      }
+      if (data) {
+        const { error: cgError } = await supabase.from("country_groups").insert(
+          Array.from(formGroupCountryIds).map((country_id) => ({ country_id, group_id: data.id })),
         );
+        if (cgError) {
+          alert(`Group created but countries failed: ${cgError.message}`);
+          setGroupSaving(false);
+          await fetchData();
+          setIsGroupDialogOpen(false);
+          resetGroupForm();
+          return;
+        }
+      }
+      if (data) setGroups((prev) => [data, ...prev]);
+      await fetchData();
+    } else if (groupMode === "editar" && selectedGroup) {
+      const { error } = await supabase
+        .from("groups")
+        .update({
+          nombre: trimmedName,
+          descripcion: formGroupDescripcion.trim() || null,
+        })
+        .eq("id", selectedGroup.id);
+      if (error) {
+        alert(`Error: ${error.message}`);
+        setGroupSaving(false);
+        return;
+      }
+      await supabase.from("country_groups").delete().eq("group_id", selectedGroup.id);
+      if (formGroupCountryIds.size > 0) {
+        const { error: cgError } = await supabase.from("country_groups").insert(
+          Array.from(formGroupCountryIds).map((country_id) => ({
+            country_id,
+            group_id: selectedGroup.id,
+          })),
+        );
+        if (cgError) {
+          alert(`Group saved but countries failed: ${cgError.message}`);
+          setGroupSaving(false);
+          await fetchData();
+          setIsGroupDialogOpen(false);
+          resetGroupForm();
+          return;
+        }
+      }
+      setGroups((prev) =>
+        prev.map((x) =>
+          x.id === selectedGroup.id
+            ? { ...x, nombre: trimmedName, descripcion: formGroupDescripcion.trim() || null }
+            : x,
+        ),
+      );
+      await fetchData();
     }
-    setRegionSaving(false);
-    setIsRegionDialogOpen(false);
-    resetRegionForm();
-  };
-
-  // --- Countries CRUD ---
-  const countryDialogTitle = useMemo(() => {
-    if (countryMode === "crear") return "Create country";
-    if (countryMode === "editar") return "Edit country";
-    return "Country details";
-  }, [countryMode]);
-
-  const resetCountryForm = () => {
-    setFormCountryNombre("");
-    setFormCountryRegionId("__none__");
-    setSelectedCountry(null);
-    setCountryMode("crear");
-  };
-
-  const openCreateCountry = () => {
-    resetCountryForm();
-    setCountryMode("crear");
-    setIsCountryDialogOpen(true);
+    setGroupSaving(false);
+    setIsGroupDialogOpen(false);
+    resetGroupForm();
   };
 
   const openViewCountry = (c: Country) => {
     setSelectedCountry(c);
-    setFormCountryNombre(c.nombre);
-    setFormCountryRegionId(c.region_id ?? "__none__");
-    setCountryMode("ver");
     setIsCountryDialogOpen(true);
   };
 
-  const openEditCountry = (c: Country) => {
-    setSelectedCountry(c);
-    setFormCountryNombre(c.nombre);
-    setFormCountryRegionId(c.region_id ?? "__none__");
-    setCountryMode("editar");
-    setIsCountryDialogOpen(true);
-  };
-
-  const handleDeleteCountry = async (c: Country) => {
-    if (!window.confirm(`Delete country "${c.nombre}"?`)) return;
-    const { error } = await supabase.from("countries").delete().eq("id", c.id);
-    if (error) {
-      alert(`Error: ${error.message}`);
-      return;
-    }
-    setCountries((prev) => prev.filter((x) => x.id !== c.id));
-    if (selectedCountry?.id === c.id) {
-      resetCountryForm();
-      setIsCountryDialogOpen(false);
-    }
-  };
-
-  const handleCountrySubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!formCountryNombre.trim()) {
-      alert("Name is required.");
-      return;
-    }
-    setCountrySaving(true);
-    const regionId = formCountryRegionId && formCountryRegionId !== "__none__" ? formCountryRegionId : null;
-    if (countryMode === "crear") {
-      const { data, error } = await supabase
-        .from("countries")
-        .insert({ nombre: formCountryNombre.trim(), region_id: regionId })
-        .select("id, nombre, region_id")
-        .single();
-      if (error) {
-        alert(`Error: ${error.message}`);
-      } else if (data) {
-        const region = regionById.get(data.region_id ?? "");
-        setCountries((prev) => [{ ...data, region }, ...prev]);
-      }
-    } else if (countryMode === "editar" && selectedCountry) {
-      const { error } = await supabase
-        .from("countries")
-        .update({ nombre: formCountryNombre.trim(), region_id: regionId })
-        .eq("id", selectedCountry.id);
-      if (error) alert(`Error: ${error.message}`);
-      else {
-        const region = regionById.get(regionId ?? "");
-        setCountries((prev) =>
-          prev.map((x) =>
-            x.id === selectedCountry.id ? { ...x, nombre: formCountryNombre.trim(), region_id: regionId, region } : x,
-          ),
-        );
-      }
-    }
-    setCountrySaving(false);
+  const closeCountryDialog = () => {
     setIsCountryDialogOpen(false);
-    resetCountryForm();
+    setSelectedCountry(null);
   };
 
-  const isRegionReadOnly = regionMode === "ver";
-  const isCountryReadOnly = countryMode === "ver";
+  const isGroupReadOnly = groupMode === "ver";
+  const countriesForSelectedGroup = selectedGroup ? (countriesInGroup.get(selectedGroup.id) ?? []) : [];
 
   return (
-    <div className="rounded-2xl border border-border bg-card p-8 space-y-6">
-      <div className="flex items-center justify-between gap-4">
+    <div className="space-y-4">
+      <div className="rounded-lg border border-border bg-card overflow-hidden">
+      <div className="px-6 py-4 border-b border-border bg-muted/30 flex flex-wrap items-center justify-between gap-4">
         <div className="space-y-1">
-          <h1 className="text-2xl font-bold text-foreground">Countries & Regions</h1>
+          <h1 className="text-2xl font-bold text-foreground">Countries & Groups</h1>
           <p className="text-sm text-muted-foreground max-w-xl">
-            Manage regions and countries. Assign each country to a region. Create regions first, then add countries.
+            Manage groups and assign countries when creating or editing a group. Countries are read-only on this page; they can only be added or edited from{" "}
+            <Link to="/master-list" className="text-primary font-medium underline-offset-4 hover:underline">
+              Master List
+            </Link>
+            .
           </p>
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          <Dialog open={isRegionDialogOpen} onOpenChange={setIsRegionDialogOpen}>
-            <DialogTrigger asChild>
-              <Button variant="outline" size="sm" className="h-9 shrink-0 inline-flex items-center gap-2" onClick={openCreateRegion}>
-                <Plus className="w-3.5 h-3.5" />
-                Create region
-              </Button>
-            </DialogTrigger>
+          <Dialog
+            open={isGroupDialogOpen}
+            onOpenChange={(open) => {
+              setIsGroupDialogOpen(open);
+              if (!open) resetGroupForm();
+            }}
+          >
+            <Button variant="outline" size="sm" className="h-9 shrink-0 inline-flex items-center gap-2" onClick={openCreateGroup} type="button">
+              <Plus className="w-3.5 h-3.5" />
+              Group
+            </Button>
             <DialogContent>
               <DialogHeader>
-                <DialogTitle>{regionDialogTitle}</DialogTitle>
+                <DialogTitle>{groupDialogTitle}</DialogTitle>
               </DialogHeader>
-              <form className="space-y-4" onSubmit={handleRegionSubmit}>
+              <form className="space-y-4" onSubmit={handleGroupSubmit}>
                 <div className="space-y-2">
-                  <Label htmlFor="region-nombre">Name *</Label>
+                  <Label htmlFor="group-nombre">Name *</Label>
                   <Input
-                    id="region-nombre"
-                    value={formRegionNombre}
-                    onChange={(e) => setFormRegionNombre(e.target.value)}
+                    id="group-nombre"
+                    value={formGroupNombre}
+                    onChange={(e) => setFormGroupNombre(e.target.value)}
                     placeholder="e.g. North America"
                     required
-                    readOnly={isRegionReadOnly}
+                    readOnly={isGroupReadOnly}
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="region-descripcion">Description (optional)</Label>
+                  <Label htmlFor="group-descripcion">Description (optional)</Label>
                   <Textarea
-                    id="region-descripcion"
-                    value={formRegionDescripcion}
-                    onChange={(e) => setFormRegionDescripcion(e.target.value)}
+                    id="group-descripcion"
+                    value={formGroupDescripcion}
+                    onChange={(e) => setFormGroupDescripcion(e.target.value)}
                     placeholder="Additional info"
                     rows={3}
-                    readOnly={isRegionReadOnly}
+                    readOnly={isGroupReadOnly}
                   />
                 </div>
+                {groupMode === "ver" && selectedGroup && (
+                  <div className="space-y-2">
+                    <Label>Countries in this group ({countriesForSelectedGroup.length})</Label>
+                    {countriesForSelectedGroup.length > 0 ? (
+                      <div className="rounded-lg border border-border bg-muted/30 p-3 max-h-40 overflow-y-auto space-y-1">
+                        {countriesForSelectedGroup.map((c) => (
+                          <div key={c.id} className="text-sm flex items-center gap-2">
+                            <Globe className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                            {c.nombre}
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-sm text-muted-foreground">No countries in this group.</p>
+                    )}
+                  </div>
+                )}
+                {(groupMode === "crear" || groupMode === "editar") && (
+                  <div className="space-y-2">
+                    <Label>
+                      Countries ({formGroupCountryIds.size} selected)
+                      {groupMode === "crear" && (
+                        <span className="block text-xs font-normal text-muted-foreground mt-0.5">
+                          At least 2 countries are required to create a group.
+                        </span>
+                      )}
+                    </Label>
+                    <Input
+                      value={groupCountrySearch}
+                      onChange={(e) => setGroupCountrySearch(e.target.value)}
+                      placeholder="Search countries…"
+                      className="text-sm"
+                    />
+                    <div className="rounded-lg border border-border bg-muted/30 p-3 max-h-48 overflow-y-auto space-y-2">
+                      {countriesFilteredForGroupForm.length > 0 ? (
+                        countriesFilteredForGroupForm.map((c) => (
+                          <label key={c.id} className="flex items-center gap-2 text-sm cursor-pointer">
+                            <Checkbox
+                              checked={formGroupCountryIds.has(c.id)}
+                              onCheckedChange={() => toggleFormGroupCountry(c.id)}
+                            />
+                            <Globe className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                            {c.nombre}
+                          </label>
+                        ))
+                      ) : (
+                        <p className="text-xs text-muted-foreground">
+                          {countries.length === 0 ? (
+                            <>
+                              No countries yet. Add them from{" "}
+                              <Link to="/master-list" className="text-primary font-medium underline-offset-2 hover:underline">
+                                Master List
+                              </Link>
+                              .
+                            </>
+                          ) : (
+                            "No matches."
+                          )}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                )}
                 <DialogFooter>
-                  {isRegionReadOnly ? (
-                    <Button type="button" variant="secondary" onClick={() => setIsRegionDialogOpen(false)}>
+                  {isGroupReadOnly ? (
+                    <Button type="button" variant="secondary" onClick={() => setIsGroupDialogOpen(false)}>
                       Close
                     </Button>
                   ) : (
                     <>
-                      <Button type="button" variant="outline" onClick={() => setIsRegionDialogOpen(false)}>
+                      <Button type="button" variant="outline" onClick={() => setIsGroupDialogOpen(false)}>
                         Cancel
                       </Button>
-                      <Button type="submit" disabled={regionSaving}>
-                        {regionSaving ? "Saving…" : regionMode === "crear" ? "Create" : "Save"}
+                      <Button type="submit" disabled={groupSaving}>
+                        {groupSaving ? "Saving…" : groupMode === "crear" ? "Create" : "Save"}
                       </Button>
                     </>
                   )}
@@ -354,88 +512,51 @@ const AjustesPaises = () => {
               </form>
             </DialogContent>
           </Dialog>
-          <Dialog open={isCountryDialogOpen} onOpenChange={setIsCountryDialogOpen}>
-            <DialogTrigger asChild>
-              <Button variant="outline" size="sm" className="h-9 shrink-0 inline-flex items-center gap-2" onClick={openCreateCountry}>
-                <Plus className="w-3.5 h-3.5" />
-                Create country
-              </Button>
-            </DialogTrigger>
+          <Dialog open={isCountryDialogOpen} onOpenChange={(open) => !open && closeCountryDialog()}>
             <DialogContent>
               <DialogHeader>
-                <DialogTitle>{countryDialogTitle}</DialogTitle>
+                <DialogTitle>Country details</DialogTitle>
               </DialogHeader>
-              <form className="space-y-4" onSubmit={handleCountrySubmit}>
-                <div className="space-y-2">
-                  <Label htmlFor="country-nombre">Name *</Label>
-                  <Input
-                    id="country-nombre"
-                    value={formCountryNombre}
-                    onChange={(e) => setFormCountryNombre(e.target.value)}
-                    placeholder="e.g. Mexico"
-                    required
-                    readOnly={isCountryReadOnly}
-                  />
+              {selectedCountry && (
+                <div className="space-y-4">
+                  <div className="space-y-2">
+                    <Label>Name</Label>
+                    <p className="text-sm font-medium text-foreground">{selectedCountry.nombre}</p>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Groups</Label>
+                    {selectedCountry.groupIds.length > 0 ? (
+                      <div className="flex flex-wrap gap-1.5 rounded-lg border border-border bg-muted/30 p-3">
+                        {selectedCountry.groupIds.map((gid) => {
+                          const g = groupById.get(gid);
+                          return g ? (
+                            <Badge key={gid} variant="secondary" className="font-normal">
+                              {g.nombre}
+                            </Badge>
+                          ) : null;
+                        })}
+                      </div>
+                    ) : (
+                      <p className="text-sm text-muted-foreground">Not assigned to any group.</p>
+                    )}
+                  </div>
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="country-region">Region</Label>
-                  <Select value={formCountryRegionId} onValueChange={setFormCountryRegionId} disabled={isCountryReadOnly}>
-                    <SelectTrigger id="country-region">
-                      <SelectValue placeholder="Select region (optional)" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="__none__">None</SelectItem>
-                      {regions.map((r) => (
-                        <SelectItem key={r.id} value={r.id}>
-                          {r.nombre}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <DialogFooter>
-                  {isCountryReadOnly ? (
-                    <Button type="button" variant="secondary" onClick={() => setIsCountryDialogOpen(false)}>
-                      Close
-                    </Button>
-                  ) : (
-                    <>
-                      <Button type="button" variant="outline" onClick={() => setIsCountryDialogOpen(false)}>
-                        Cancel
-                      </Button>
-                      <Button type="submit" disabled={countrySaving}>
-                        {countrySaving ? "Saving…" : countryMode === "crear" ? "Create" : "Save"}
-                      </Button>
-                    </>
-                  )}
-                </DialogFooter>
-              </form>
+              )}
+              <DialogFooter>
+                <Button type="button" variant="secondary" onClick={closeCountryDialog}>
+                  Close
+                </Button>
+              </DialogFooter>
             </DialogContent>
           </Dialog>
         </div>
       </div>
 
-      {/* Importar países desde archivo - visible siempre */}
-      <div className="rounded-xl border border-border bg-card p-4 mb-6">
-        <div className="space-y-4">
-          <div>
-            <p className="text-sm font-medium text-foreground flex items-center gap-2">
-              <Upload className="w-4 h-4" />
-              Importar países y regiones desde archivo
-            </p>
-            <p className="text-xs text-muted-foreground mt-1">
-              Sube un CSV o XLSX con columnas: Country, Region, RegionCode. Opcional: EffectiveDate, ValidTo, DateAdded.
-            </p>
-          </div>
-          <CountriesFileUploader onSuccess={fetchData} compact />
-        </div>
-      </div>
-
-      <Tabs defaultValue="regions" className="space-y-4">
+      <Tabs value={mainTab} onValueChange={(v) => setMainTab(v as "groups" | "countries")} className="px-6 py-4 space-y-4">
         <TabsList className="grid w-full max-w-md grid-cols-2">
-          <TabsTrigger value="regions" className="gap-2">
+          <TabsTrigger value="groups" className="gap-2">
             <MapPin className="w-3.5 h-3.5" />
-            Regions
+            Groups
           </TabsTrigger>
           <TabsTrigger value="countries" className="gap-2">
             <Globe className="w-3.5 h-3.5" />
@@ -443,66 +564,118 @@ const AjustesPaises = () => {
           </TabsTrigger>
         </TabsList>
 
-        <TabsContent value="regions" className="space-y-4">
-          <div className="rounded-xl border border-border bg-background/40 mx-4 mt-4 mb-4">
+        <TabsContent value="groups" className="space-y-4">
+          <div className="relative max-w-md">
+            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground pointer-events-none" />
+            <Input
+              className="pl-9"
+              placeholder="Search groups…"
+              value={groupTableSearch}
+              onChange={(e) => setGroupTableSearch(e.target.value)}
+              aria-label="Search groups"
+            />
+          </div>
+          <div className="overflow-hidden">
             <Table>
               <TableHeader>
-                <TableRow>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Description</TableHead>
-                  <TableHead className="w-40 text-right">Actions</TableHead>
+                <TableRow className="border-b border-border hover:bg-transparent">
+                  <SortableTableHead
+                    sortKey="nombre"
+                    sort={groupSort}
+                    onSort={(k) => setGroupSort((s) => cycleSort(s, k as "nombre" | "descripcion" | "countries"))}
+                    className="h-11 px-6 font-medium text-muted-foreground bg-muted/50"
+                  >
+                    Name
+                  </SortableTableHead>
+                  <SortableTableHead
+                    sortKey="descripcion"
+                    sort={groupSort}
+                    onSort={(k) => setGroupSort((s) => cycleSort(s, k as "nombre" | "descripcion" | "countries"))}
+                    className="h-11 px-6 font-medium text-muted-foreground bg-muted/50"
+                  >
+                    Description
+                  </SortableTableHead>
+                  <SortableTableHead
+                    sortKey="countries"
+                    sort={groupSort}
+                    onSort={(k) => setGroupSort((s) => cycleSort(s, k as "nombre" | "descripcion" | "countries"))}
+                    className="h-11 w-28 px-6 font-medium text-muted-foreground bg-muted/50 tabular-nums"
+                    align="right"
+                  >
+                    Countries
+                  </SortableTableHead>
+                  <TableHead className="w-12 text-right bg-muted/50"></TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {loading ? (
-                  <TableRow>
-                    <TableCell colSpan={3} className="text-center py-12 text-sm text-muted-foreground">
+                  <TableRow className="border-b border-border hover:bg-transparent">
+                    <TableCell colSpan={4} className="text-center py-12 text-muted-foreground px-6">
                       <RefreshCw className="w-4 h-4 animate-spin inline-block mr-2" />
                       Loading…
                     </TableCell>
                   </TableRow>
-                ) : regions.length === 0 ? (
-                  <TableRow>
-                    <TableCell colSpan={3} className="text-center text-sm text-muted-foreground py-8">
-                      No regions. Create the first one.
+                ) : groups.length === 0 ? (
+                  <TableRow className="border-b border-border hover:bg-transparent">
+                    <TableCell colSpan={4} className="text-center py-12 text-muted-foreground px-6">
+                      No groups. Create the first one.
+                    </TableCell>
+                  </TableRow>
+                ) : sortedFilteredGroups.length === 0 ? (
+                  <TableRow className="border-b border-border hover:bg-transparent">
+                    <TableCell colSpan={4} className="text-center py-12 text-muted-foreground px-6">
+                      No groups match your search.
                     </TableCell>
                   </TableRow>
                 ) : (
-                  paginatedRegions.map((r) => (
-                    <TableRow key={r.id}>
-                      <TableCell className="font-medium">{r.nombre}</TableCell>
-                      <TableCell className="text-muted-foreground">
-                        {r.descripcion ?? <span className="italic text-xs">—</span>}
+                  paginatedGroups.map((g) => (
+                    <TableRow key={g.id} className="border-b border-border">
+                      <TableCell className="font-medium px-6 py-4">{g.nombre}</TableCell>
+                      <TableCell className="text-muted-foreground px-6 py-4">
+                        {g.descripcion ?? <span className="italic text-xs">—</span>}
                       </TableCell>
-                      <TableCell className="text-right space-x-2">
-                        <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => openViewRegion(r)} aria-label={`View ${r.nombre}`}>
-                          <Eye className="w-4 h-4" />
-                        </Button>
-                        <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => openEditRegion(r)} aria-label={`Edit ${r.nombre}`}>
-                          <Pencil className="w-4 h-4" />
-                        </Button>
-                        <Button size="icon" variant="ghost" className="h-8 w-8 text-destructive hover:text-destructive" onClick={() => handleDeleteRegion(r)} aria-label={`Delete ${r.nombre}`}>
-                          <Trash2 className="w-4 h-4" />
-                        </Button>
+                      <TableCell className="text-right px-6 py-4 tabular-nums text-muted-foreground">
+                        {(countriesInGroup.get(g.id) ?? []).length}
+                      </TableCell>
+                      <TableCell className="text-right px-6 py-4">
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button size="icon" variant="ghost" className="h-8 w-8" aria-label="Actions">
+                              <MoreVertical className="w-4 h-4" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            <DropdownMenuItem onClick={() => openViewGroup(g)}>
+                              <Eye className="w-4 h-4 mr-2" />
+                              View
+                            </DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => openEditGroup(g)}>
+                              <Pencil className="w-4 h-4 mr-2" />
+                              Edit
+                            </DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => handleDeleteGroup(g)} className="text-destructive focus:text-destructive">
+                              <Trash2 className="w-4 h-4 mr-2" />
+                              Delete
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
                       </TableCell>
                     </TableRow>
                   ))
                 )}
               </TableBody>
             </Table>
-            {regions.length > 0 && (
-              <div className="flex items-center justify-between px-4 py-3 border-t border-border bg-muted/50 rounded-b-xl text-sm text-muted-foreground">
-                <span>
-                  Showing {((regionPage - 1) * PAGE_SIZE) + 1}-{Math.min(regionPage * PAGE_SIZE, regions.length)} of {regions.length}
-                </span>
+            {sortedFilteredGroups.length > 0 && (
+              <div className="flex items-center justify-between gap-4 px-6 py-3 border-t border-border bg-muted/30 text-sm text-muted-foreground">
+                <span>{Math.min(groupPage * PAGE_SIZE, sortedFilteredGroups.length) - (groupPage - 1) * PAGE_SIZE} of {sortedFilteredGroups.length} items</span>
                 <div className="flex items-center gap-2">
-                  <Button variant="outline" size="sm" onClick={() => setRegionPage((p) => Math.max(1, p - 1))} disabled={regionPage <= 1}>
-                    Previous
-                  </Button>
-                  <span className="text-xs">Page {regionPage} of {regionTotalPages}</span>
-                  <Button variant="outline" size="sm" onClick={() => setRegionPage((p) => Math.min(regionTotalPages, p + 1))} disabled={regionPage >= regionTotalPages}>
-                    Next
-                  </Button>
+                <span className="min-w-[4rem] text-center">{groupPage} / {groupTotalPages}</span>
+                <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => setGroupPage((p) => Math.max(1, p - 1))} disabled={groupPage <= 1} aria-label="Previous page">
+                  <ChevronLeft className="w-4 h-4" />
+                </Button>
+                <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => setGroupPage((p) => Math.min(groupTotalPages, p + 1))} disabled={groupPage >= groupTotalPages} aria-label="Next page">
+                  <ChevronRight className="w-4 h-4" />
+                </Button>
                 </div>
               </div>
             )}
@@ -510,77 +683,121 @@ const AjustesPaises = () => {
         </TabsContent>
 
         <TabsContent value="countries" className="space-y-4">
-          <div className="rounded-xl border border-border bg-background/40 mx-4 mt-4 mb-4">
+          <div className="relative max-w-md">
+            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground pointer-events-none" />
+            <Input
+              className="pl-9"
+              placeholder="Search by country or group name…"
+              value={countryTableSearch}
+              onChange={(e) => setCountryTableSearch(e.target.value)}
+              aria-label="Search countries"
+            />
+          </div>
+          <div className="overflow-hidden">
             <Table>
               <TableHeader>
-                <TableRow>
-                  <TableHead>Country</TableHead>
-                  <TableHead>Region</TableHead>
-                  <TableHead className="w-40 text-right">Actions</TableHead>
+                <TableRow className="border-b border-border hover:bg-transparent">
+                  <SortableTableHead
+                    sortKey="country"
+                    sort={countrySort}
+                    onSort={(k) => setCountrySort((s) => cycleSort(s, k as "country" | "groups"))}
+                    className="h-11 px-6 font-medium text-muted-foreground bg-muted/50"
+                  >
+                    Country
+                  </SortableTableHead>
+                  <SortableTableHead
+                    sortKey="groups"
+                    sort={countrySort}
+                    onSort={(k) => setCountrySort((s) => cycleSort(s, k as "country" | "groups"))}
+                    className="h-11 px-6 font-medium text-muted-foreground bg-muted/50"
+                  >
+                    Group
+                  </SortableTableHead>
+                  <TableHead className="w-12 text-right bg-muted/50"></TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {loading ? (
-                  <TableRow>
-                    <TableCell colSpan={3} className="text-center py-12 text-sm text-muted-foreground">
+                  <TableRow className="border-b border-border hover:bg-transparent">
+                    <TableCell colSpan={3} className="text-center py-12 text-muted-foreground px-6">
                       <RefreshCw className="w-4 h-4 animate-spin inline-block mr-2" />
                       Loading…
                     </TableCell>
                   </TableRow>
                 ) : countries.length === 0 ? (
-                  <TableRow>
-                    <TableCell colSpan={3} className="text-center text-sm text-muted-foreground py-8">
-                      No countries. Create the first one.
+                  <TableRow className="border-b border-border hover:bg-transparent">
+                    <TableCell colSpan={3} className="text-center py-12 text-muted-foreground px-6">
+                      No countries yet. Add them from{" "}
+                      <Link to="/master-list" className="text-primary font-medium underline-offset-2 hover:underline">
+                        Master List
+                      </Link>
+                      .
+                    </TableCell>
+                  </TableRow>
+                ) : sortedFilteredCountries.length === 0 ? (
+                  <TableRow className="border-b border-border hover:bg-transparent">
+                    <TableCell colSpan={3} className="text-center py-12 text-muted-foreground px-6">
+                      No countries match your search.
                     </TableCell>
                   </TableRow>
                 ) : (
                   paginatedCountries.map((c) => (
-                    <TableRow key={c.id}>
-                      <TableCell className="font-medium">{c.nombre}</TableCell>
-                      <TableCell>
-                        {c.region ? (
-                          <Badge variant="secondary" className="font-normal">
-                            {c.region.nombre}
-                          </Badge>
+                    <TableRow key={c.id} className="border-b border-border">
+                      <TableCell className="font-medium px-6 py-4">{c.nombre}</TableCell>
+                      <TableCell className="px-6 py-4">
+                        {c.groupIds.length > 0 ? (
+                          <span className="flex flex-wrap gap-1">
+                            {c.groupIds.map((gid) => {
+                              const g = groupById.get(gid);
+                              return g ? (
+                                <Badge key={gid} variant="secondary" className="font-normal">
+                                  {g.nombre}
+                                </Badge>
+                              ) : null;
+                            })}
+                          </span>
                         ) : (
                           <span className="text-muted-foreground italic text-xs">—</span>
                         )}
                       </TableCell>
-                      <TableCell className="text-right space-x-2">
-                        <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => openViewCountry(c)} aria-label={`View ${c.nombre}`}>
-                          <Eye className="w-4 h-4" />
-                        </Button>
-                        <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => openEditCountry(c)} aria-label={`Edit ${c.nombre}`}>
-                          <Pencil className="w-4 h-4" />
-                        </Button>
-                        <Button size="icon" variant="ghost" className="h-8 w-8 text-destructive hover:text-destructive" onClick={() => handleDeleteCountry(c)} aria-label={`Delete ${c.nombre}`}>
-                          <Trash2 className="w-4 h-4" />
-                        </Button>
+                      <TableCell className="text-right px-6 py-4">
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button size="icon" variant="ghost" className="h-8 w-8" aria-label="Actions">
+                              <MoreVertical className="w-4 h-4" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            <DropdownMenuItem onClick={() => openViewCountry(c)}>
+                              <Eye className="w-4 h-4 mr-2" />
+                              View
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
                       </TableCell>
                     </TableRow>
                   ))
                 )}
               </TableBody>
             </Table>
-            {countries.length > 0 && (
-              <div className="flex items-center justify-between px-4 py-3 border-t border-border bg-muted/50 rounded-b-xl text-sm text-muted-foreground">
-                <span>
-                  Showing {((countryPage - 1) * PAGE_SIZE) + 1}-{Math.min(countryPage * PAGE_SIZE, countries.length)} of {countries.length}
-                </span>
+            {sortedFilteredCountries.length > 0 && (
+              <div className="flex items-center justify-between gap-4 px-6 py-3 border-t border-border bg-muted/30 text-sm text-muted-foreground">
+                <span>{Math.min(countryPage * PAGE_SIZE, sortedFilteredCountries.length) - (countryPage - 1) * PAGE_SIZE} of {sortedFilteredCountries.length} items</span>
                 <div className="flex items-center gap-2">
-                  <Button variant="outline" size="sm" onClick={() => setCountryPage((p) => Math.max(1, p - 1))} disabled={countryPage <= 1}>
-                    Previous
-                  </Button>
-                  <span className="text-xs">Page {countryPage} of {countryTotalPages}</span>
-                  <Button variant="outline" size="sm" onClick={() => setCountryPage((p) => Math.min(countryTotalPages, p + 1))} disabled={countryPage >= countryTotalPages}>
-                    Next
-                  </Button>
+                <span className="min-w-[4rem] text-center">{countryPage} / {countryTotalPages}</span>
+                <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => setCountryPage((p) => Math.max(1, p - 1))} disabled={countryPage <= 1} aria-label="Previous page">
+                  <ChevronLeft className="w-4 h-4" />
+                </Button>
+                <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => setCountryPage((p) => Math.min(countryTotalPages, p + 1))} disabled={countryPage >= countryTotalPages} aria-label="Next page">
+                  <ChevronRight className="w-4 h-4" />
+                </Button>
                 </div>
               </div>
             )}
           </div>
         </TabsContent>
       </Tabs>
+      </div>
     </div>
   );
 };

@@ -19,8 +19,16 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { SortableTableHead } from "@/components/ui/sortable-table-head";
+import { cycleSort, compareText, type SortState } from "@/lib/tableSort";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { supabase } from "@/integrations/supabase/client";
-import { RefreshCw, Pencil, Trash2, Eye, Plus } from "lucide-react";
+import { RefreshCw, Pencil, Trash2, Eye, Plus, MoreVertical, ChevronLeft, ChevronRight } from "lucide-react";
 
 type Client = {
   id: string;
@@ -41,6 +49,7 @@ const AjustesClients = () => {
 
   const [formName, setFormName] = useState("");
   const [formDescription, setFormDescription] = useState("");
+  const [clientSort, setClientSort] = useState<SortState<"name" | "description">>(null);
 
   const fetchClients = async () => {
     setLoading(true);
@@ -56,8 +65,25 @@ const AjustesClients = () => {
     fetchClients();
   }, []);
 
-  const totalPages = Math.max(1, Math.ceil(clients.length / PAGE_SIZE));
-  const paginatedClients = clients.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  useEffect(() => {
+    setPage(1);
+  }, [clientSort]);
+
+  const sortedClients = useMemo(() => {
+    if (!clientSort) return clients;
+    const { key, dir } = clientSort;
+    const m = dir === "asc" ? 1 : -1;
+    return [...clients].sort((a, b) => {
+      const c =
+        key === "name"
+          ? compareText(a.name, b.name)
+          : compareText(a.description, b.description);
+      return c * m;
+    });
+  }, [clients, clientSort]);
+
+  const totalPages = Math.max(1, Math.ceil(sortedClients.length / PAGE_SIZE));
+  const paginatedClients = sortedClients.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
 
   const isReadOnly = mode === "ver";
   const dialogTitle = useMemo(() => {
@@ -168,24 +194,16 @@ const AjustesClients = () => {
   };
 
   return (
-    <div className="rounded-2xl border border-border bg-card p-8 space-y-6">
-      <div className="flex items-center justify-between gap-4">
-        <div className="space-y-1">
-          <h1 className="text-2xl font-bold text-foreground">
-            Settings · Clients
-          </h1>
-          <p className="text-sm text-muted-foreground max-w-xl">
-            Manage clients. Each client can have many quotations. Create, edit,
-            view, or delete records.
-          </p>
-        </div>
-        <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
-          <DialogTrigger asChild>
-            <Button variant="outline" size="sm" className="h-9 shrink-0 inline-flex items-center gap-2" onClick={openCreateDialog}>
-              <Plus className="w-3.5 h-3.5" />
-              Create client
-            </Button>
-          </DialogTrigger>
+    <div className="space-y-4">
+      <div className="rounded-lg border border-border bg-card overflow-hidden">
+        <div className="px-6 py-4 border-b border-border bg-muted/30 flex flex-wrap items-center justify-between gap-4">
+          <div />
+          <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
+            <DialogTrigger asChild>
+              <Button size="sm" className="h-9 px-4 rounded-lg" onClick={openCreateDialog} aria-label="Create client">
+                <Plus className="w-4 h-4" />
+              </Button>
+            </DialogTrigger>
           <DialogContent>
             <DialogHeader>
               <DialogTitle>{dialogTitle}</DialogTitle>
@@ -250,97 +268,95 @@ const AjustesClients = () => {
               </DialogFooter>
             </form>
           </DialogContent>
-        </Dialog>
-      </div>
+          </Dialog>
+        </div>
 
-      <div className="rounded-xl border border-border bg-background/40 mx-4 mt-4 mb-4">
         <Table>
           <TableHeader>
-            <TableRow>
-              <TableHead>Name</TableHead>
-              <TableHead>Description</TableHead>
-              <TableHead className="w-40 text-right">Actions</TableHead>
+            <TableRow className="border-b border-border hover:bg-transparent">
+              <SortableTableHead
+                sortKey="name"
+                sort={clientSort}
+                onSort={(k) => setClientSort((s) => cycleSort(s, k as "name" | "description"))}
+                className="h-11 px-6 font-medium text-muted-foreground bg-muted/50"
+              >
+                Name
+              </SortableTableHead>
+              <SortableTableHead
+                sortKey="description"
+                sort={clientSort}
+                onSort={(k) => setClientSort((s) => cycleSort(s, k as "name" | "description"))}
+                className="h-11 px-6 font-medium text-muted-foreground bg-muted/50"
+              >
+                Description
+              </SortableTableHead>
+              <TableHead className="w-12 text-right bg-muted/50"></TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {loading ? (
-              <TableRow>
-                <TableCell
-                  colSpan={3}
-                  className="text-center py-12 text-sm text-muted-foreground"
-                >
+              <TableRow className="border-b border-border hover:bg-transparent">
+                <TableCell colSpan={3} className="text-center py-12 text-muted-foreground px-6">
                   <RefreshCw className="w-4 h-4 animate-spin inline-block mr-2" />
                   Loading clients…
                 </TableCell>
               </TableRow>
             ) : clients.length === 0 ? (
-              <TableRow>
-                <TableCell
-                  colSpan={3}
-                  className="text-center text-sm text-muted-foreground py-8"
-                >
-                  No clients yet. Create the first one with the "Create client"
-                  button.
+              <TableRow className="border-b border-border hover:bg-transparent">
+                <TableCell colSpan={3} className="text-center py-12 text-muted-foreground px-6">
+                  No clients yet. Create the first one with the + button.
                 </TableCell>
               </TableRow>
             ) : (
               paginatedClients.map((client) => (
-                <TableRow key={client.id}>
-                  <TableCell className="font-medium">{client.name}</TableCell>
-                  <TableCell className="text-muted-foreground">
+                <TableRow key={client.id} className="border-b border-border">
+                  <TableCell className="font-medium px-6 py-4">{client.name}</TableCell>
+                  <TableCell className="text-muted-foreground px-6 py-4">
                     {client.description ?? (
                       <span className="italic text-xs text-muted-foreground">
                         No description
                       </span>
                     )}
                   </TableCell>
-                  <TableCell className="text-right space-x-2">
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      className="h-8 w-8"
-                      onClick={() => openViewDialog(client)}
-                      aria-label={`View client ${client.name}`}
-                    >
-                      <Eye className="w-4 h-4" />
-                    </Button>
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      className="h-8 w-8"
-                      onClick={() => openEditDialog(client)}
-                      aria-label={`Edit client ${client.name}`}
-                    >
-                      <Pencil className="w-4 h-4" />
-                    </Button>
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      className="h-8 w-8 text-destructive hover:text-destructive"
-                      onClick={() => handleDelete(client)}
-                      aria-label={`Delete client ${client.name}`}
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </Button>
+                  <TableCell className="text-right px-6 py-4">
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button size="icon" variant="ghost" className="h-8 w-8" aria-label="Actions">
+                          <MoreVertical className="w-4 h-4" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem onClick={() => openViewDialog(client)}>
+                          <Eye className="w-4 h-4 mr-2" />
+                          View
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => openEditDialog(client)}>
+                          <Pencil className="w-4 h-4 mr-2" />
+                          Edit
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => handleDelete(client)} className="text-destructive focus:text-destructive">
+                          <Trash2 className="w-4 h-4 mr-2" />
+                          Delete
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   </TableCell>
                 </TableRow>
               ))
             )}
           </TableBody>
         </Table>
-        {clients.length > 0 && (
-          <div className="flex items-center justify-between px-4 py-3 border-t border-border bg-muted/50 rounded-b-xl text-sm text-muted-foreground">
-            <span>
-              Showing {((page - 1) * PAGE_SIZE) + 1}-{Math.min(page * PAGE_SIZE, clients.length)} of {clients.length}
-            </span>
+        {sortedClients.length > 0 && (
+          <div className="flex items-center justify-between gap-4 px-6 py-3 border-t border-border bg-muted/30 text-sm text-muted-foreground">
+            <span>{Math.min(page * PAGE_SIZE, sortedClients.length) - (page - 1) * PAGE_SIZE} of {sortedClients.length} items</span>
             <div className="flex items-center gap-2">
-              <Button variant="outline" size="sm" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1}>
-                Previous
-              </Button>
-              <span className="text-xs">Page {page} of {totalPages}</span>
-              <Button variant="outline" size="sm" onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages}>
-                Next
-              </Button>
+            <span className="min-w-[4rem] text-center">{page} / {totalPages}</span>
+            <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1} aria-label="Previous page">
+              <ChevronLeft className="w-4 h-4" />
+            </Button>
+            <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages} aria-label="Next page">
+              <ChevronRight className="w-4 h-4" />
+            </Button>
             </div>
           </div>
         )}

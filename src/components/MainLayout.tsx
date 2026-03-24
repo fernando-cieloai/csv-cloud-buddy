@@ -7,7 +7,7 @@ const MainLayout = () => {
   return (
     <div className="min-h-screen bg-background">
       <header className="border-b border-border bg-card shadow-sm">
-        <div className="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between gap-6">
+        <div className="max-w-[1600px] mx-auto px-6 py-4 flex items-center justify-between gap-6">
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 rounded-xl bg-primary flex items-center justify-center">
               <PhoneCall className="w-5 h-5 text-primary-foreground" />
@@ -23,7 +23,7 @@ const MainLayout = () => {
         </div>
       </header>
 
-      <main className="max-w-5xl mx-auto px-6 py-12">
+      <main className="max-w-[1600px] mx-auto px-6 py-12">
         <AppBreadcrumbs className="mb-6" />
         <Outlet />
       </main>

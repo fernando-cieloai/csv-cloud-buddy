@@ -4,85 +4,89 @@
 
 @layer base {
   :root {
-    --background: 220 20% 97%;
-    --foreground: 220 25% 12%;
+    /* CallPass-inspired palette: white/light grey backgrounds, dark navy-purple primary */
+    --background: 0 0% 99%;
+    --foreground: 224 25% 14%;
 
     --card: 0 0% 100%;
-    --card-foreground: 220 25% 12%;
+    --card-foreground: 224 25% 14%;
 
     --popover: 0 0% 100%;
-    --popover-foreground: 220 25% 12%;
+    --popover-foreground: 224 25% 14%;
 
-    --primary: 215 85% 45%;
+    /* Dark navy/purple primary (CallPass-style action buttons) */
+    --primary: 243 47% 32%;
     --primary-foreground: 0 0% 100%;
 
-    --secondary: 215 30% 92%;
-    --secondary-foreground: 215 85% 35%;
+    --secondary: 220 14% 96%;
+    --secondary-foreground: 224 25% 25%;
 
-    --muted: 220 15% 94%;
-    --muted-foreground: 220 10% 50%;
+    --muted: 220 14% 96%;
+    --muted-foreground: 220 9% 46%;
 
-    --accent: 215 60% 90%;
-    --accent-foreground: 215 85% 35%;
+    --accent: 243 30% 95%;
+    --accent-foreground: 243 47% 32%;
 
-    --destructive: 0 75% 55%;
+    --destructive: 0 72% 51%;
     --destructive-foreground: 0 0% 100%;
 
-    --border: 220 15% 88%;
-    --input: 220 15% 88%;
-    --ring: 215 85% 45%;
+    --border: 220 13% 91%;
+    --input: 220 13% 91%;
+    --ring: 243 47% 32%;
 
-    --radius: 0.75rem;
+    --radius: 0.5rem;
 
-    --success: 142 70% 40%;
+    /* Soft green (Ancillary/Active badges) */
+    --success: 142 52% 42%;
     --success-foreground: 0 0% 100%;
-    --success-muted: 142 40% 93%;
+    --success-muted: 142 36% 93%;
 
-    --warning: 38 90% 50%;
-    --warning-muted: 38 80% 93%;
+    /* Soft yellow/amber (Base/other badges) */
+    --warning: 38 92% 50%;
+    --warning-muted: 43 74% 94%;
 
-    --sidebar-background: 220 25% 14%;
-    --sidebar-foreground: 220 15% 85%;
-    --sidebar-primary: 215 85% 55%;
+    --sidebar-background: 243 47% 24%;
+    --sidebar-foreground: 0 0% 95%;
+    --sidebar-primary: 243 47% 45%;
     --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 220 20% 22%;
-    --sidebar-accent-foreground: 220 15% 90%;
-    --sidebar-border: 220 20% 22%;
-    --sidebar-ring: 215 85% 55%;
+    --sidebar-accent: 243 30% 28%;
+    --sidebar-accent-foreground: 0 0% 95%;
+    --sidebar-border: 243 30% 28%;
+    --sidebar-ring: 243 47% 45%;
   }
 
   .dark {
-    --background: 220 25% 8%;
+    --background: 224 25% 9%;
     --foreground: 220 15% 92%;
-    --card: 220 25% 11%;
+    --card: 224 25% 11%;
     --card-foreground: 220 15% 92%;
-    --popover: 220 25% 11%;
+    --popover: 224 25% 11%;
     --popover-foreground: 220 15% 92%;
-    --primary: 215 85% 58%;
-    --primary-foreground: 0 0% 100%;
-    --secondary: 220 20% 18%;
-    --secondary-foreground: 215 60% 75%;
-    --muted: 220 20% 16%;
+    --primary: 243 47% 58%;
+    --primary-foreground: 243 47% 15%;
+    --secondary: 224 20% 18%;
+    --secondary-foreground: 243 40% 80%;
+    --muted: 224 20% 16%;
     --muted-foreground: 220 10% 58%;
-    --accent: 220 20% 20%;
-    --accent-foreground: 215 60% 78%;
+    --accent: 243 30% 22%;
+    --accent-foreground: 243 40% 80%;
     --destructive: 0 70% 50%;
     --destructive-foreground: 0 0% 100%;
-    --border: 220 20% 20%;
-    --input: 220 20% 20%;
-    --ring: 215 85% 58%;
-    --success: 142 60% 50%;
+    --border: 224 20% 20%;
+    --input: 224 20% 20%;
+    --ring: 243 47% 58%;
+    --success: 142 55% 48%;
     --success-muted: 142 30% 16%;
-    --warning: 38 85% 55%;
+    --warning: 38 90% 55%;
     --warning-muted: 38 40% 15%;
-    --sidebar-background: 220 25% 6%;
-    --sidebar-foreground: 220 15% 85%;
-    --sidebar-primary: 215 85% 58%;
-    --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 220 20% 14%;
-    --sidebar-accent-foreground: 220 15% 90%;
-    --sidebar-border: 220 20% 14%;
-    --sidebar-ring: 215 85% 58%;
+    --sidebar-background: 243 47% 12%;
+    --sidebar-foreground: 0 0% 95%;
+    --sidebar-primary: 243 47% 55%;
+    --sidebar-primary-foreground: 243 47% 10%;
+    --sidebar-accent: 243 35% 18%;
+    --sidebar-accent-foreground: 0 0% 95%;
+    --sidebar-border: 243 35% 18%;
+    --sidebar-ring: 243 47% 55%;
   }
 }
 

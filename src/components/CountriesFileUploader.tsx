@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useMemo } from "react";
 import { Upload, FileText, CheckCircle, AlertCircle, Loader2, Trash2, X } from "lucide-react";
 import * as XLSX from "xlsx";
 import { supabase } from "@/integrations/supabase/client";
@@ -12,6 +12,8 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { SortableNativeTh } from "@/components/ui/sortable-native-th";
+import { cycleSort, compareText, type SortState } from "@/lib/tableSort";
 
 interface CountryRegionRow {
   country: string;
@@ -70,7 +72,7 @@ function parseCSV(text: string): { data: CountryRegionRow[]; errors: ParseError[
   const data: CountryRegionRow[] = [];
 
   if (lines.length < 2) {
-    errors.push({ row: 0, message: "El archivo está vacío o no tiene filas de datos." });
+    errors.push({ row: 0, message: "The file is empty or has no data rows." });
     return { data, errors };
   }
 
@@ -88,7 +90,7 @@ function parseCSV(text: string): { data: CountryRegionRow[]; errors: ParseError[
     const regionCode = colMap["region_code"] >= 0 ? cols[colMap["region_code"]] : cols[2];
 
     if (!country?.trim() || !region?.trim() || !regionCode?.trim()) {
-      errors.push({ row: i + 1, message: `Fila ${i + 1}: faltan Country, Region o RegionCode.` });
+      errors.push({ row: i + 1, message: `Row ${i + 1}: missing Country, Region or RegionCode.` });
       continue;
     }
 
@@ -113,7 +115,7 @@ function parseXLSX(buffer: ArrayBuffer): { data: CountryRegionRow[]; errors: Par
     const wb = XLSX.read(buffer, { type: "array" });
     const sheetName = wb.SheetNames[0];
     if (!sheetName) {
-      errors.push({ row: 0, message: "El archivo no tiene hojas." });
+      errors.push({ row: 0, message: "The file has no sheets." });
       return { data, errors };
     }
 
@@ -121,7 +123,7 @@ function parseXLSX(buffer: ArrayBuffer): { data: CountryRegionRow[]; errors: Par
     const rows = XLSX.utils.sheet_to_json<string[]>(sheet, { header: 1, defval: "" }) as string[][];
 
     if (rows.length < 2) {
-      errors.push({ row: 0, message: "El archivo está vacío o no tiene filas de datos." });
+      errors.push({ row: 0, message: "The file is empty or has no data rows." });
       return { data, errors };
     }
 
@@ -150,7 +152,7 @@ function parseXLSX(buffer: ArrayBuffer): { data: CountryRegionRow[]; errors: Par
       });
     }
   } catch (e) {
-    errors.push({ row: 0, message: e instanceof Error ? e.message : "Error al leer el archivo." });
+    errors.push({ row: 0, message: e instanceof Error ? e.message : "Error reading the file." });
   }
 
   return { data, errors };
@@ -168,6 +170,20 @@ export default function CountriesFileUploader({ onSuccess, compact = false }: Co
   const [parseErrors, setParseErrors] = useState<ParseError[]>([]);
   const [uploadedCount, setUploadedCount] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
+  const [previewSort, setPreviewSort] = useState<SortState<"country" | "region" | "region_code">>(null);
+
+  const sortedPreviewRows = useMemo(() => {
+    if (!previewSort || parsedData.length === 0) return parsedData;
+    const { key, dir } = previewSort;
+    const m = dir === "asc" ? 1 : -1;
+    return [...parsedData].sort((a, b) => {
+      const c = compareText(
+        String(a[key as keyof CountryRegionRow] ?? ""),
+        String(b[key as keyof CountryRegionRow] ?? ""),
+      );
+      return c * m;
+    });
+  }, [parsedData, previewSort]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const resetState = () => {
@@ -206,7 +222,7 @@ export default function CountriesFileUploader({ onSuccess, compact = false }: Co
           .single();
 
         if (error) {
-          setParseErrors((prev) => [...prev, { row: 0, message: `Error al crear país "${nombre}": ${error.message}` }]);
+          setParseErrors((prev) => [...prev, { row: 0, message: `Error creating country "${nombre}": ${error.message}` }]);
           setStatus("error");
           return;
         }
@@ -235,7 +251,7 @@ export default function CountriesFileUploader({ onSuccess, compact = false }: Co
       });
 
       if (error) {
-        setParseErrors((prev) => [...prev, { row: i + 2, message: `Error en lote: ${error.message}` }]);
+        setParseErrors((prev) => [...prev, { row: i + 2, message: `Batch error: ${error.message}` }]);
         setStatus("error");
         return;
       }
@@ -252,7 +268,7 @@ export default function CountriesFileUploader({ onSuccess, compact = false }: Co
     const isCsv = file.name.toLowerCase().endsWith(".csv");
     const isXlsx = file.name.toLowerCase().endsWith(".xlsx");
     if (!isCsv && !isXlsx) {
-      setParseErrors([{ row: 0, message: "Solo se aceptan archivos .csv o .xlsx." }]);
+      setParseErrors([{ row: 0, message: "Only .csv or .xlsx files are accepted." }]);
       setStatus("error");
       return;
     }
@@ -302,16 +318,16 @@ export default function CountriesFileUploader({ onSuccess, compact = false }: Co
       <AlertDialog open={status === "confirming"}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Confirmar importación</AlertDialogTitle>
+            <AlertDialogTitle>Confirm import</AlertDialogTitle>
             <AlertDialogDescription>
-              Se importarán <strong>{parsedData.length} registros</strong> de{" "}
-              <span className="font-mono">{fileName}</span>. Se crearán países si no existen y se
-              insertarán/actualizarán las regiones con sus códigos. ¿Continuar?
+              Will import <strong>{parsedData.length} records</strong> from{" "}
+              <span className="font-mono">{fileName}</span>. Countries will be created if they don&apos;t exist and
+              country-region prefix data will be inserted/updated. Continue?
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel onClick={resetState}>Cancelar</AlertDialogCancel>
-            <AlertDialogAction onClick={() => doUpload(parsedData)}>Sí, importar</AlertDialogAction>
+            <AlertDialogCancel onClick={resetState}>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={() => doUpload(parsedData)}>Yes, import</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
@@ -342,8 +358,8 @@ export default function CountriesFileUploader({ onSuccess, compact = false }: Co
                   <Upload className="w-7 h-7 text-primary" />
                 </div>
                 <div>
-                  <p className="text-base font-semibold text-foreground">Subir archivo de países/regiones</p>
-                  <p className="text-sm text-muted-foreground mt-1">Arrastra CSV o XLSX aquí o haz clic</p>
+                  <p className="text-base font-semibold text-foreground">Upload countries & prefix file</p>
+                  <p className="text-sm text-muted-foreground mt-1">Drag CSV or XLSX here or click</p>
                 </div>
                 <div className="flex gap-2 flex-wrap justify-center text-xs text-muted-foreground">
                   {["Country", "Region", "RegionCode"].map((col) => (
@@ -358,7 +374,7 @@ export default function CountriesFileUploader({ onSuccess, compact = false }: Co
             {status === "parsing" && (
               <>
                 <Loader2 className="w-10 h-10 text-primary animate-spin" />
-                <p className="text-base font-medium text-foreground">Procesando archivo…</p>
+                <p className="text-base font-medium text-foreground">Processing file…</p>
               </>
             )}
 
@@ -366,7 +382,7 @@ export default function CountriesFileUploader({ onSuccess, compact = false }: Co
               <>
                 <FileText className="w-10 h-10 text-primary" />
                 <p className="text-base font-medium text-foreground">
-                  {parsedData.length} registros listos — confirma en el diálogo
+                  {parsedData.length} records ready — confirm in the dialog
                 </p>
               </>
             )}
@@ -375,7 +391,7 @@ export default function CountriesFileUploader({ onSuccess, compact = false }: Co
               <>
                 <Loader2 className="w-10 h-10 text-primary animate-spin" />
                 <p className="text-base font-medium text-foreground">
-                  Guardando… ({uploadedCount} / {parsedData.length})
+                  Saving… ({uploadedCount} / {parsedData.length})
                 </p>
                 <div className="w-full max-w-xs bg-muted rounded-full h-2 overflow-hidden">
                   <div
@@ -392,7 +408,7 @@ export default function CountriesFileUploader({ onSuccess, compact = false }: Co
                   <CheckCircle className="w-7 h-7 text-emerald-600" />
                 </div>
                 <div>
-                  <p className="text-base font-semibold text-emerald-600">{uploadedCount} registros guardados</p>
+                  <p className="text-base font-semibold text-emerald-600">{uploadedCount} records saved</p>
                   <p className="text-sm text-muted-foreground mt-1">{fileName}</p>
                 </div>
               </>
@@ -403,7 +419,7 @@ export default function CountriesFileUploader({ onSuccess, compact = false }: Co
                 <div className="w-14 h-14 rounded-2xl bg-destructive/10 flex items-center justify-center">
                   <AlertCircle className="w-7 h-7 text-destructive" />
                 </div>
-                <p className="text-base font-medium text-destructive">No se pudo procesar el archivo</p>
+                <p className="text-base font-medium text-destructive">Could not process the file</p>
               </>
             )}
           </div>
@@ -427,7 +443,7 @@ export default function CountriesFileUploader({ onSuccess, compact = false }: Co
           <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-4 space-y-2">
             <p className="text-sm font-semibold text-destructive flex items-center gap-2">
               <AlertCircle className="w-4 h-4" />
-              {parseErrors.length} advertencia(s)
+              {parseErrors.length} warning{parseErrors.length > 1 ? "s" : ""}
             </p>
             <ul className="space-y-1">
               {parseErrors.slice(0, 5).map((err, i) => (
@@ -436,7 +452,7 @@ export default function CountriesFileUploader({ onSuccess, compact = false }: Co
                 </li>
               ))}
               {parseErrors.length > 5 && (
-                <li className="text-xs text-muted-foreground pl-2">…y {parseErrors.length - 5} más</li>
+                <li className="text-xs text-muted-foreground pl-2">…and {parseErrors.length - 5} more</li>
               )}
             </ul>
           </div>
@@ -445,7 +461,7 @@ export default function CountriesFileUploader({ onSuccess, compact = false }: Co
         {parsedData.length > 0 && status !== "idle" && (
           <div className="rounded-xl border border-border overflow-hidden">
             <div className="bg-muted px-4 py-2.5 flex items-center justify-between">
-              <p className="text-sm font-semibold text-foreground">Vista previa — {parsedData.length} filas</p>
+              <p className="text-sm font-semibold text-foreground">Preview — {parsedData.length} rows</p>
               {status === "success" && (
                 <button
                   type="button"
@@ -453,7 +469,7 @@ export default function CountriesFileUploader({ onSuccess, compact = false }: Co
                   className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-destructive transition-colors"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
-                  Subir otro archivo
+                  Upload another file
                 </button>
               )}
             </div>
@@ -461,15 +477,34 @@ export default function CountriesFileUploader({ onSuccess, compact = false }: Co
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-border bg-card">
-                    {["Country", "Region", "RegionCode"].map((h) => (
-                      <th key={h} className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase">
-                        {h}
-                      </th>
-                    ))}
+                    <SortableNativeTh
+                      sortKey="country"
+                      sort={previewSort}
+                      onSort={(k) => setPreviewSort((s) => cycleSort(s, k as "country" | "region" | "region_code"))}
+                      className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase"
+                    >
+                      Country
+                    </SortableNativeTh>
+                    <SortableNativeTh
+                      sortKey="region"
+                      sort={previewSort}
+                      onSort={(k) => setPreviewSort((s) => cycleSort(s, k as "country" | "region" | "region_code"))}
+                      className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase"
+                    >
+                      Region
+                    </SortableNativeTh>
+                    <SortableNativeTh
+                      sortKey="region_code"
+                      sort={previewSort}
+                      onSort={(k) => setPreviewSort((s) => cycleSort(s, k as "country" | "region" | "region_code"))}
+                      className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase"
+                    >
+                      RegionCode
+                    </SortableNativeTh>
                   </tr>
                 </thead>
                 <tbody>
-                  {parsedData.slice(0, 20).map((row, i) => (
+                  {sortedPreviewRows.slice(0, 20).map((row, i) => (
                     <tr key={i} className="border-b border-border last:border-0 hover:bg-muted/40">
                       <td className="px-4 py-2.5">{row.country}</td>
                       <td className="px-4 py-2.5">{row.region}</td>
@@ -479,7 +514,7 @@ export default function CountriesFileUploader({ onSuccess, compact = false }: Co
                   {parsedData.length > 20 && (
                     <tr>
                       <td colSpan={3} className="px-4 py-2 text-center text-xs text-muted-foreground">
-                        …mostrando 20 de {parsedData.length}
+                        …showing 20 of {parsedData.length}
                       </td>
                     </tr>
                   )}

@@ -10,7 +10,7 @@ const CotizacionesEdit = () => {
   if (!id) {
     return (
       <div className="p-6 text-muted-foreground">
-        ID de cotización no especificado
+        Quotation ID not specified
       </div>
     );
   }

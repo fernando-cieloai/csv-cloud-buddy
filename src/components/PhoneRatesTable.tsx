@@ -1,6 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { Database, RefreshCw, Search, FileStack } from "lucide-react";
+import { formatRate } from "@/lib/utils";
+import { SortableNativeTh } from "@/components/ui/sortable-native-th";
+import { cycleSort, compareText, compareNumber, type SortState } from "@/lib/tableSort";
 
 interface PhoneRate {
   id: string;
@@ -31,6 +34,7 @@ export default function PhoneRatesTable() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [phoneRatesSort, setPhoneRatesSort] = useState<SortState<string>>(null);
 
   const fetchUploads = async () => {
     setLoading(true);
@@ -93,8 +97,7 @@ export default function PhoneRatesTable() {
     fetchUploads();
   }, []);
 
-  // One row per match (country + network + prefix); left columns are country and network; columns per file with rate or "no data"
-  const rows = (() => {
+  const baseRows = useMemo(() => {
     const keyToRow = new Map<
       RowKey,
       { country: string; network: string; prefix: string; rateType: string; ratesByUploadId: Map<string, number> }
@@ -127,13 +130,36 @@ export default function PhoneRatesTable() {
           x.rateType.toLowerCase().includes(q)
       );
     }
-    list.sort((a, b) =>
-      [a.country, a.network, a.prefix, a.rateType].join("\t").localeCompare(
-        [b.country, b.network, b.prefix, b.rateType].join("\t")
-      )
-    );
     return list;
-  })();
+  }, [uploads, search]);
+
+  const rows = useMemo(() => {
+    if (!phoneRatesSort) {
+      return [...baseRows].sort((a, b) =>
+        [a.country, a.network, a.prefix, a.rateType].join("\t").localeCompare(
+          [b.country, b.network, b.prefix, b.rateType].join("\t"),
+          undefined,
+          { numeric: true, sensitivity: "base" },
+        ),
+      );
+    }
+    const { key, dir } = phoneRatesSort;
+    const m = dir === "asc" ? 1 : -1;
+    return [...baseRows].sort((a, b) => {
+      let c = 0;
+      if (key === "country") c = compareText(a.country, b.country);
+      else if (key === "network") c = compareText(a.network, b.network);
+      else if (key === "type") c = compareText(a.rateType, b.rateType);
+      else if (key === "prefix") c = compareText(a.prefix, b.prefix);
+      else if (key.startsWith("upload:")) {
+        const id = key.slice("upload:".length);
+        c = compareNumber(a.ratesByUploadId.get(id), b.ratesByUploadId.get(id));
+      }
+      return c * m;
+    });
+  }, [baseRows, phoneRatesSort]);
+
+  const useCountryRowSpan = phoneRatesSort === null;
 
   return (
     <div className="space-y-4">
@@ -152,15 +178,21 @@ export default function PhoneRatesTable() {
             </h3>
           </div>
           <div className="flex items-center gap-3">
-            <div className="relative">
-              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
-              <input
-                type="text"
-                placeholder="Filter by country, network, type or prefix…"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                className="pl-8 pr-3 py-1.5 text-xs rounded-lg border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring w-64"
-              />
+            <p className="text-xs text-muted-foreground hidden sm:inline">Search by country, network, type or prefix</p>
+            <div className="flex items-center gap-2">
+              <div className="relative">
+                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground pointer-events-none" />
+                <input
+                  type="text"
+                  placeholder="Country, network, type, prefix…"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  className="pl-8 pr-3 py-1.5 text-xs rounded-lg border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring w-64"
+                />
+              </div>
+              {search && (
+                <span className="text-xs text-primary font-medium">Filtering</span>
+              )}
             </div>
             <button
               onClick={fetchUploads}
@@ -195,7 +227,7 @@ export default function PhoneRatesTable() {
       ) : uploads.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-16 text-muted-foreground gap-2 rounded-2xl border border-border bg-card">
           <Database className="w-8 h-8 opacity-30" />
-          <p className="text-sm">No files yet. Upload a CSV under Settings → Upload CSV to see the comparison.</p>
+          <p className="text-sm">No files yet. Upload a CSV under Vendors to see the comparison.</p>
         </div>
       ) : (
         <div className="rounded-2xl border border-border bg-card overflow-hidden flex flex-col max-h-[28rem]">
@@ -203,27 +235,50 @@ export default function PhoneRatesTable() {
             <table className="w-full text-sm border-collapse">
               <thead className="sticky top-0 z-10 bg-card">
                 <tr className="border-b border-border">
-                  <th className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide bg-muted border-r-2 border-border w-[6rem] min-w-[6rem]">
+                  <SortableNativeTh
+                    sortKey="country"
+                    sort={phoneRatesSort}
+                    onSort={(k) => setPhoneRatesSort((s) => cycleSort(s, k))}
+                    className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide bg-muted border-r-2 border-border w-[6rem] min-w-[6rem]"
+                  >
                     Country
-                  </th>
-                  <th className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide bg-muted border-r border-border w-[5rem] min-w-[5rem]">
+                  </SortableNativeTh>
+                  <SortableNativeTh
+                    sortKey="network"
+                    sort={phoneRatesSort}
+                    onSort={(k) => setPhoneRatesSort((s) => cycleSort(s, k))}
+                    className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide bg-muted border-r border-border w-[5rem] min-w-[5rem]"
+                  >
                     Network
-                  </th>
-                  <th className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide bg-muted border-r border-border w-[5rem] min-w-[5rem]">
+                  </SortableNativeTh>
+                  <SortableNativeTh
+                    sortKey="type"
+                    sort={phoneRatesSort}
+                    onSort={(k) => setPhoneRatesSort((s) => cycleSort(s, k))}
+                    className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide bg-muted border-r border-border w-[5rem] min-w-[5rem]"
+                  >
                     Type
-                  </th>
-                  <th className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide bg-muted border-r-2 border-border w-[4rem] min-w-[4rem]">
+                  </SortableNativeTh>
+                  <SortableNativeTh
+                    sortKey="prefix"
+                    sort={phoneRatesSort}
+                    onSort={(k) => setPhoneRatesSort((s) => cycleSort(s, k))}
+                    className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide bg-muted border-r-2 border-border w-[4rem] min-w-[4rem]"
+                  >
                     Prefix
-                  </th>
+                  </SortableNativeTh>
                   {uploads.map((u) => (
-                    <th
+                    <SortableNativeTh
                       key={u.id}
+                      sortKey={`upload:${u.id}`}
+                      sort={phoneRatesSort}
+                      onSort={(k) => setPhoneRatesSort((s) => cycleSort(s, k))}
                       className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide bg-muted/70 border-l-2 border-border min-w-[8rem] w-40"
                     >
                       <span className="font-mono truncate block" title={u.file_name}>
                         {u.file_name}
                       </span>
-                    </th>
+                    </SortableNativeTh>
                   ))}
                 </tr>
               </thead>
@@ -236,18 +291,21 @@ export default function PhoneRatesTable() {
                   </tr>
                 ) : (
                   rows.map((row, idx) => {
-                    const prevSameCountry = idx > 0 && rows[idx - 1].country === row.country;
+                    let showCountry = true;
                     let countrySpan = 1;
-                    if (!prevSameCountry) {
-                      for (let i = idx + 1; i < rows.length && rows[i].country === row.country; i++)
-                        countrySpan++;
+                    if (useCountryRowSpan) {
+                      const prevSameCountry = idx > 0 && rows[idx - 1].country === row.country;
+                      showCountry = !prevSameCountry;
+                      if (showCountry) {
+                        for (let i = idx + 1; i < rows.length && rows[i].country === row.country; i++)
+                          countrySpan++;
+                      }
                     }
-                    const showCountry = !prevSameCountry;
                     return (
                       <tr key={idx} className="border-b border-border hover:bg-muted/20">
                         {showCountry ? (
                           <td
-                            rowSpan={countrySpan}
+                            rowSpan={useCountryRowSpan ? countrySpan : undefined}
                             className="px-4 py-2.5 text-foreground align-top bg-muted/30 border-r-2 border-border font-medium"
                           >
                             {row.country}
@@ -270,7 +328,7 @@ export default function PhoneRatesTable() {
                               className="px-4 py-2.5 border-l-2 border-border bg-card/50"
                             >
                               {rate != null ? (
-                                <span className="font-mono text-foreground">{rate.toFixed(4)}</span>
+                                <span className="font-mono text-foreground">{formatRate(rate)}</span>
                               ) : (
                                 <span className="text-muted-foreground italic">no data</span>
                               )}

@@ -10,13 +10,13 @@ import {
 
 const ROUTE_LABELS: Record<string, string> = {
   quotations: "Quotations",
-  create: "Create",
+  create: "+",
   edit: "Edit",
   vendors: "Vendors",
   clients: "Clients",
   countries: "Countries",
-  settings: "Settings",
-  csv: "Upload CSV",
+  "master-list": "Master List",
+  upload: "Upload CSV",
 };
 
 const UUID_REGEX = /^[0-9a-f-]{36}$/i;

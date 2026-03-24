@@ -21,7 +21,7 @@ export const VENDOR_TEMPLATE_SHEET_NAMES = [
 /** Headers for quotation export/download (matches template order). */
 export const QUOTATION_EXPORT_HEADERS = [
   "Country",
-  "Type",
+  "Network",
   "Rate",
   "Effective Date",
   "Initial Increment",

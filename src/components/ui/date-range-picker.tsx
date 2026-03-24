@@ -19,15 +19,17 @@ export interface DateRangePickerProps {
   placeholder?: string;
   className?: string;
   disabled?: boolean;
+  title?: string;
 }
 
 export function DateRangePicker({
   from,
   to,
   onChange,
-  placeholder = "Select date range",
+  placeholder = "—",
   className,
   disabled,
+  title,
 }: DateRangePickerProps) {
   const range: DateRange | undefined = React.useMemo(() => {
     if (!from && !to) return undefined;
@@ -65,12 +67,12 @@ export function DateRangePicker({
           variant="outline"
           size="sm"
           className={cn(
-            "h-9 w-[240px] justify-center text-center font-normal",
+            "h-9 w-[180px] justify-start text-left font-normal",
             !from && !to && "text-muted-foreground",
             className
           )}
           disabled={disabled}
-          title="From – To date range"
+          title={title ?? "Date range"}
         >
           <CalendarIcon className="mr-2 h-3.5 w-3.5 shrink-0" />
           <span className="truncate">{displayText}</span>
@@ -78,7 +80,7 @@ export function DateRangePicker({
       </PopoverTrigger>
       <PopoverContent className="w-auto p-0" align="start">
         <div className="p-2 border-b text-xs text-muted-foreground text-center">
-          Select From and To dates
+          From – To
         </div>
         <Calendar
           mode="range"

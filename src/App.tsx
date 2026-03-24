@@ -13,6 +13,7 @@ import AjustesVendor from "./pages/AjustesVendor";
 import AjustesClients from "./pages/AjustesClients";
 import AjustesCsv from "./pages/AjustesCsv";
 import AjustesPaises from "./pages/AjustesPaises";
+import MasterList from "./pages/MasterList";
 
 const queryClient = new QueryClient();
 
@@ -31,7 +32,8 @@ const App = () => (
             <Route path="/vendors" element={<AjustesVendor />} />
             <Route path="/clients" element={<AjustesClients />} />
             <Route path="/countries" element={<AjustesPaises />} />
-            <Route path="/settings/csv" element={<AjustesCsv />} />
+            <Route path="/master-list" element={<MasterList />} />
+            <Route path="/upload" element={<AjustesCsv />} />
           </Route>
           {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
           <Route path="*" element={<NotFound />} />

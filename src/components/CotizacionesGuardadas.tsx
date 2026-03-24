@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useMemo } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
-import { RefreshCw, Eye, FileDown, Plus, Search, Pencil, Archive, ArchiveRestore } from "lucide-react";
+import { RefreshCw, Eye, FileDown, Plus, Search, Pencil, Archive, ArchiveRestore, MoreVertical, ChevronLeft, ChevronRight, X } from "lucide-react";
 import * as XLSX from "xlsx";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -14,6 +14,9 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { SortableTableHead } from "@/components/ui/sortable-table-head";
+import { SortableNativeTh } from "@/components/ui/sortable-native-th";
+import { cycleSort, compareText, compareNumber, type SortState } from "@/lib/tableSort";
 import {
   Dialog,
   DialogContent,
@@ -33,9 +36,16 @@ import {
 import { DateRangePicker } from "@/components/ui/date-range-picker";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
   QUOTATION_EXPORT_HEADERS,
   QUOTATION_DEFAULTS,
 } from "@/lib/vendorTemplate";
+import { formatRate, roundUpTo3Decimals } from "@/lib/utils";
 
 const RATE_TYPES = ["International", "Origin Based", "Local"];
 
@@ -94,8 +104,10 @@ export default function CotizacionesGuardadas() {
   const [filterDateFrom, setFilterDateFrom] = useState("");
   const [filterDateTo, setFilterDateTo] = useState("");
   const [viewingQuotation, setViewingQuotation] = useState<SavedQuotation | null>(null);
+  const [viewRowsSort, setViewRowsSort] = useState<SortState<"country" | "type">>(null);
   const [page, setPage] = useState(1);
   const [pageSize] = useState(10);
+  const [quotListSort, setQuotListSort] = useState<SortState<"name" | "client" | "vendor" | "status" | "created">>(null);
 
   const fetchData = async () => {
     setLoading(true);
@@ -119,7 +131,7 @@ export default function CotizacionesGuardadas() {
 
   const filteredQuotations = useMemo(() => {
     const searchLower = nameSearch.toLowerCase().trim();
-    const filtered = quotations.filter((q) => {
+    return quotations.filter((q) => {
       if (searchLower && !(q.name ?? "").toLowerCase().includes(searchLower)) return false;
       if (filterClientId !== "__all__" && q.client_id !== filterClientId) return false;
       if (filterStatus !== "all") {
@@ -132,23 +144,29 @@ export default function CotizacionesGuardadas() {
       if (filterDateTo && createdAt > new Date(filterDateTo + "T23:59:59")) return false;
       return true;
     });
-    return [...filtered].sort((a, b) => {
-      const aArchived = (a.status ?? "active") === "archived";
-      const bArchived = (b.status ?? "active") === "archived";
-      if (aArchived !== bArchived) return aArchived ? 1 : -1;
-      return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
-    });
   }, [quotations, nameSearch, filterClientId, filterStatus, filterDateFrom, filterDateTo]);
 
-  const totalPages = Math.max(1, Math.ceil(filteredQuotations.length / pageSize));
-  const paginatedQuotations = useMemo(
-    () => filteredQuotations.slice((page - 1) * pageSize, page * pageSize),
-    [filteredQuotations, page, pageSize]
-  );
+  const isFiltering = nameSearch.trim() || filterClientId !== "__all__" || filterStatus !== "all" || filterDateFrom || filterDateTo;
+  const clearFilters = () => {
+    setNameSearch("");
+    setFilterClientId("__all__");
+    setFilterStatus("all");
+    setFilterDateFrom("");
+    setFilterDateTo("");
+    setPage(1);
+  };
 
   useEffect(() => {
     setPage(1);
   }, [nameSearch, filterClientId, filterStatus, filterDateFrom, filterDateTo]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [quotListSort]);
+
+  useEffect(() => {
+    setViewRowsSort(null);
+  }, [viewingQuotation?.id]);
 
   const vendorById = useMemo(() => {
     const m = new Map<string, Vendor>();
@@ -161,6 +179,43 @@ export default function CotizacionesGuardadas() {
     for (const c of clients) m.set(c.id, c);
     return m;
   }, [clients]);
+
+  const sortedQuotations = useMemo(() => {
+    if (!quotListSort) {
+      return [...filteredQuotations].sort((a, b) => {
+        const aArchived = (a.status ?? "active") === "archived";
+        const bArchived = (b.status ?? "active") === "archived";
+        if (aArchived !== bArchived) return aArchived ? 1 : -1;
+        return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+      });
+    }
+    const { key, dir } = quotListSort;
+    const m = dir === "asc" ? 1 : -1;
+    const vendorLabel = (q: SavedQuotation) =>
+      [...q.vendor_ids]
+        .map((vid) => vendorById.get(vid)?.nombre ?? "")
+        .sort()
+        .join(", ");
+    return [...filteredQuotations].sort((a, b) => {
+      let c = 0;
+      if (key === "name") c = compareText(a.name, b.name);
+      else if (key === "client")
+        c = compareText(
+          a.client_id ? (clientById.get(a.client_id)?.name ?? "") : "",
+          b.client_id ? (clientById.get(b.client_id)?.name ?? "") : "",
+        );
+      else if (key === "vendor") c = compareText(vendorLabel(a), vendorLabel(b));
+      else if (key === "status") c = compareText(a.status ?? "active", b.status ?? "active");
+      else c = compareNumber(new Date(a.created_at).getTime(), new Date(b.created_at).getTime());
+      return c * m;
+    });
+  }, [filteredQuotations, quotListSort, clientById, vendorById]);
+
+  const totalPages = Math.max(1, Math.ceil(sortedQuotations.length / pageSize));
+  const paginatedQuotations = useMemo(
+    () => sortedQuotations.slice((page - 1) * pageSize, page * pageSize),
+    [sortedQuotations, page, pageSize],
+  );
 
   const handleArchive = async (q: SavedQuotation) => {
     const newStatus = (q.status ?? "active") === "archived" ? "active" : "archived";
@@ -180,6 +235,21 @@ export default function CotizacionesGuardadas() {
 
   const isNewSnapshotFormat = (snap: SavedQuotation["snapshot"]) =>
     Array.isArray(snap.rateTypes) && snap.rateTypes.length > 0;
+
+  const viewDialogSortedRows = useMemo(() => {
+    const snap = viewingQuotation?.snapshot;
+    if (!snap?.rows?.length) return [];
+    const rows = [...snap.rows];
+    if (!viewRowsSort) return rows;
+    const { key, dir } = viewRowsSort;
+    const m = dir === "asc" ? 1 : -1;
+    return rows.sort((a, b) => {
+      if (key === "country") return compareText(a.country, b.country) * m;
+      const ta = String(a.lineType ?? a.type ?? "");
+      const tb = String(b.lineType ?? b.type ?? "");
+      return compareText(ta, tb) * m;
+    });
+  }, [viewingQuotation, viewRowsSort]);
 
   const EXCEL_CELL_MAX = 32767;
   const truncateForExcel = (s: string) =>
@@ -256,7 +326,7 @@ export default function CotizacionesGuardadas() {
       return [
         row.country,
         type,
-        bestRate ?? "",
+        bestRate != null ? roundUpTo3Decimals(bestRate) : "",
         effectiveDate,
         initialIncrement,
         nextIncrement,
@@ -267,26 +337,17 @@ export default function CotizacionesGuardadas() {
     XLSX.utils.book_append_sheet(wb, ws, "Quotation");
     const name = q.name?.replace(/[^\w\s-]/g, "") || "quotation";
     XLSX.writeFile(wb, `${name}-${new Date().toISOString().slice(0, 10)}.xlsx`);
-    toast.success("Exportado como XLSX");
+    toast.success("Exported as XLSX");
   };
 
   return (
-    <div className="space-y-6">
-      <div className="rounded-2xl border border-border bg-card p-8 space-y-6">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex flex-wrap items-center gap-2 sm:gap-3 min-w-0 flex-1">
-            <div className="relative flex-1 min-w-[140px] max-w-[220px]">
-              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
-              <Input
-                type="text"
-                placeholder="Search by name…"
-                value={nameSearch}
-                onChange={(e) => setNameSearch(e.target.value)}
-                className="pl-8 h-9"
-              />
-            </div>
+    <div className="space-y-4">
+      <div className="rounded-lg border border-border bg-card overflow-hidden">
+        {/* Filter & action bar */}
+        <div className="px-6 py-4 border-b border-border bg-muted/30 flex flex-wrap items-center justify-between gap-4">
+          <div className="flex flex-wrap items-center gap-3">
             <Select value={filterClientId} onValueChange={setFilterClientId}>
-              <SelectTrigger className="h-9 w-[140px] sm:w-[160px]">
+              <SelectTrigger className="h-9 w-[130px] rounded-lg">
                 <SelectValue placeholder="Client" />
               </SelectTrigger>
               <SelectContent>
@@ -299,11 +360,11 @@ export default function CotizacionesGuardadas() {
               </SelectContent>
             </Select>
             <Select value={filterStatus} onValueChange={setFilterStatus}>
-              <SelectTrigger className="h-9 w-[100px] sm:w-[110px]">
+              <SelectTrigger className="h-9 w-[115px] rounded-lg">
                 <SelectValue placeholder="Status" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="all">All</SelectItem>
+                <SelectItem value="all">All statuses</SelectItem>
                 <SelectItem value="active">Active</SelectItem>
                 <SelectItem value="archived">Archived</SelectItem>
               </SelectContent>
@@ -315,53 +376,110 @@ export default function CotizacionesGuardadas() {
                 setFilterDateFrom(from ?? "");
                 setFilterDateTo(to ?? "");
               }}
-              className="h-9 min-w-[220px]"
+              placeholder="Created"
+              className="h-9 rounded-lg"
             />
           </div>
-          <Button asChild variant="outline" size="sm" className="h-9 shrink-0">
-            <Link to="/quotations/create" className="inline-flex items-center gap-2">
-              <Plus className="w-3.5 h-3.5" />
-              Create
-            </Link>
-          </Button>
+          <div className="flex items-center gap-3">
+            <div className="relative w-48 sm:w-56">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+              <Input
+                type="text"
+                placeholder="Search…"
+                value={nameSearch}
+                onChange={(e) => setNameSearch(e.target.value)}
+                className="pl-9 h-9 rounded-lg border-border"
+              />
+            </div>
+            {isFiltering && (
+              <button
+                type="button"
+                onClick={clearFilters}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
+                aria-label="Clear filters"
+              >
+                <X className="w-3.5 h-3.5" />
+                Clear
+              </button>
+            )}
+            <Button asChild size="sm" className="h-9 px-4 rounded-lg">
+              <Link to="/quotations/create" className="inline-flex items-center gap-2" aria-label="Create quotation">
+                <Plus className="w-4 h-4" />
+              </Link>
+            </Button>
+          </div>
         </div>
 
-        <div className="rounded-xl border border-border bg-background/40 mx-4 mt-4 mb-4">
-          <Table>
+        <Table>
           <TableHeader>
-            <TableRow>
-              <TableHead>Name</TableHead>
-              <TableHead>Client</TableHead>
-              <TableHead>Vendor</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead>Created</TableHead>
-              <TableHead className="w-32 text-right">Actions</TableHead>
+            <TableRow className="border-b border-border hover:bg-transparent">
+              <SortableTableHead
+                sortKey="name"
+                sort={quotListSort}
+                onSort={(k) => setQuotListSort((s) => cycleSort(s, k as "name" | "client" | "vendor" | "status" | "created"))}
+                className="h-11 px-6 font-medium text-muted-foreground bg-muted/50"
+              >
+                Name
+              </SortableTableHead>
+              <SortableTableHead
+                sortKey="client"
+                sort={quotListSort}
+                onSort={(k) => setQuotListSort((s) => cycleSort(s, k as "name" | "client" | "vendor" | "status" | "created"))}
+                className="h-11 px-6 font-medium text-muted-foreground bg-muted/50"
+              >
+                Client
+              </SortableTableHead>
+              <SortableTableHead
+                sortKey="vendor"
+                sort={quotListSort}
+                onSort={(k) => setQuotListSort((s) => cycleSort(s, k as "name" | "client" | "vendor" | "status" | "created"))}
+                className="h-11 px-6 font-medium text-muted-foreground bg-muted/50"
+              >
+                Vendor
+              </SortableTableHead>
+              <SortableTableHead
+                sortKey="status"
+                sort={quotListSort}
+                onSort={(k) => setQuotListSort((s) => cycleSort(s, k as "name" | "client" | "vendor" | "status" | "created"))}
+                className="h-11 px-6 font-medium text-muted-foreground bg-muted/50"
+              >
+                Status
+              </SortableTableHead>
+              <SortableTableHead
+                sortKey="created"
+                sort={quotListSort}
+                onSort={(k) => setQuotListSort((s) => cycleSort(s, k as "name" | "client" | "vendor" | "status" | "created"))}
+                className="h-11 px-6 font-medium text-muted-foreground bg-muted/50"
+              >
+                Created
+              </SortableTableHead>
+              <TableHead className="w-12 text-right bg-muted/50"></TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {loading ? (
-              <TableRow>
-                <TableCell colSpan={6} className="text-center py-12 text-muted-foreground">
+              <TableRow className="border-b border-border hover:bg-transparent">
+                <TableCell colSpan={6} className="text-center py-12 text-muted-foreground px-6">
                   <RefreshCw className="w-4 h-4 animate-spin inline-block mr-2" />
                   Loading…
                 </TableCell>
               </TableRow>
-            ) : filteredQuotations.length === 0 ? (
-              <TableRow>
-                <TableCell colSpan={6} className="text-center py-12 text-muted-foreground">
-                  No saved quotations. Use the Create button to add one.
+            ) : sortedQuotations.length === 0 ? (
+              <TableRow className="border-b border-border hover:bg-transparent">
+                <TableCell colSpan={6} className="text-center py-12 text-muted-foreground px-6">
+                  {isFiltering ? "No quotations match the filters." : "No saved quotations. Use the + button to add one."}
                 </TableCell>
               </TableRow>
             ) : (
               paginatedQuotations.map((q) => (
-                <TableRow key={q.id}>
-                  <TableCell className="font-medium">
+                <TableRow key={q.id} className="border-b border-border">
+                  <TableCell className="font-medium px-6 py-4">
                     {q.name ?? <span className="italic text-muted-foreground">—</span>}
                   </TableCell>
-                  <TableCell className="text-muted-foreground text-sm">
+                  <TableCell className="text-muted-foreground text-sm px-6 py-4">
                     {q.client_id ? (clientById.get(q.client_id)?.name ?? "—") : "—"}
                   </TableCell>
-                  <TableCell>
+                  <TableCell className="px-6 py-4">
                     <div className="flex flex-wrap gap-1">
                       {q.vendor_ids.map((vid) => (
                         <Badge key={vid} variant="secondary" className="text-xs font-normal">
@@ -370,114 +488,78 @@ export default function CotizacionesGuardadas() {
                       ))}
                     </div>
                   </TableCell>
-                  <TableCell>
+                  <TableCell className="px-6 py-4">
                     <Badge variant={(q.status ?? "active") === "archived" ? "outline" : "secondary"} className="text-xs">
                       {(q.status ?? "active") === "archived" ? "Archived" : "Active"}
                     </Badge>
                   </TableCell>
-                  <TableCell className="text-muted-foreground text-sm">
+                  <TableCell className="text-muted-foreground text-sm px-6 py-4">
                     {formatDate(q.created_at)}
                   </TableCell>
-                  <TableCell className="text-right">
-                    <div className="flex items-center justify-end gap-2">
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <Button
-                            size="icon"
-                            variant="ghost"
-                            className="h-8 w-8"
-                            onClick={() => setViewingQuotation(q)}
-                            aria-label="View quotation"
-                          >
-                            <Eye className="w-4 h-4" />
-                          </Button>
-                        </TooltipTrigger>
-                        <TooltipContent>Ver cotización</TooltipContent>
-                      </Tooltip>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <Button
-                            size="icon"
-                            variant="ghost"
-                            className="h-8 w-8"
-                            onClick={() => navigate(`/quotations/${q.id}/edit`)}
-                            aria-label="Edit quotation"
-                          >
-                            <Pencil className="w-4 h-4" />
-                          </Button>
-                        </TooltipTrigger>
-                        <TooltipContent>Editar</TooltipContent>
-                      </Tooltip>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <Button
-                            size="icon"
-                            variant="ghost"
-                            className="h-8 w-8"
-                            onClick={() => handleExportXlsx(q)}
-                            aria-label="Download XLSX"
-                          >
-                            <FileDown className="w-4 h-4" />
-                          </Button>
-                        </TooltipTrigger>
-                        <TooltipContent>Descargar XLSX</TooltipContent>
-                      </Tooltip>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <Button
-                            size="icon"
-                            variant="ghost"
-                            className="h-8 w-8"
-                            onClick={() => handleArchive(q)}
-                            aria-label={(q.status ?? "active") === "archived" ? "Restore quotation" : "Archive quotation"}
-                          >
-                            {(q.status ?? "active") === "archived" ? (
-                              <ArchiveRestore className="w-4 h-4" />
-                            ) : (
-                              <Archive className="w-4 h-4" />
-                            )}
-                          </Button>
-                        </TooltipTrigger>
-                        <TooltipContent>
-                          {(q.status ?? "active") === "archived" ? "Restaurar" : "Archivar"}
-                        </TooltipContent>
-                      </Tooltip>
-                    </div>
+                  <TableCell className="text-right px-6 py-4">
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button size="icon" variant="ghost" className="h-8 w-8" aria-label="Actions">
+                          <MoreVertical className="w-4 h-4" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem onClick={() => setViewingQuotation(q)}>
+                          <Eye className="w-4 h-4 mr-2" />
+                          View
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => navigate(`/quotations/${q.id}/edit`)}>
+                          <Pencil className="w-4 h-4 mr-2" />
+                          Edit
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => handleExportXlsx(q)}>
+                          <FileDown className="w-4 h-4 mr-2" />
+                          Download XLSX
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => handleArchive(q)}>
+                          {(q.status ?? "active") === "archived" ? (
+                            <ArchiveRestore className="w-4 h-4 mr-2" />
+                          ) : (
+                            <Archive className="w-4 h-4 mr-2" />
+                          )}
+                          {(q.status ?? "active") === "archived" ? "Restore" : "Archive"}
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   </TableCell>
                 </TableRow>
               ))
             )}
           </TableBody>
         </Table>
-        {filteredQuotations.length > 0 && (
-          <div className="flex items-center justify-between px-4 py-3 border-t border-border bg-muted/50 rounded-b-xl text-sm text-muted-foreground">
-            <span>
-              Showing {((page - 1) * pageSize) + 1}-{Math.min(page * pageSize, filteredQuotations.length)} of {filteredQuotations.length}
-            </span>
+        {sortedQuotations.length > 0 && (
+          <div className="flex items-center justify-between gap-4 px-6 py-3 border-t border-border bg-muted/30 text-sm text-muted-foreground">
+            <span>{Math.min(page * pageSize, sortedQuotations.length) - (page - 1) * pageSize} of {sortedQuotations.length} items</span>
             <div className="flex items-center gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setPage((p) => Math.max(1, p - 1))}
-                disabled={page <= 1}
-              >
-                Previous
-              </Button>
-              <span className="text-xs">
-                Page {page} of {totalPages}
-              </span>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                disabled={page >= totalPages}
-              >
-                Next
-              </Button>
+            <span className="min-w-[4rem] text-center">{page} / {totalPages}</span>
+            <Button
+              variant="outline"
+              size="icon"
+              className="h-8 w-8"
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              disabled={page <= 1}
+              aria-label="Previous page"
+            >
+              <ChevronLeft className="w-4 h-4" />
+            </Button>
+            <Button
+              variant="outline"
+              size="icon"
+              className="h-8 w-8"
+              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+              disabled={page >= totalPages}
+              aria-label="Next page"
+            >
+              <ChevronRight className="w-4 h-4" />
+            </Button>
             </div>
           </div>
         )}
-        </div>
       </div>
 
       <Dialog open={viewingQuotation !== null} onOpenChange={(open) => !open && setViewingQuotation(null)}>
@@ -502,19 +584,25 @@ export default function CotizacionesGuardadas() {
               <table className="w-full text-sm border-collapse">
                 <thead className="sticky top-0 z-10 bg-muted">
                   <tr className="border-b border-border">
-                    <th
+                    <SortableNativeTh
                       rowSpan={viewingQuotation.snapshot.displayColumns?.length ? 2 : 1}
+                      sortKey="country"
+                      sort={viewRowsSort}
+                      onSort={(k) => setViewRowsSort((s) => cycleSort(s, k as "country" | "type"))}
                       className="text-left px-4 py-2 text-xs font-semibold"
                     >
                       Country
-                    </th>
+                    </SortableNativeTh>
                     {(!isNewSnapshotFormat(viewingQuotation.snapshot) || viewingQuotation.snapshot.rows.some((r) => r.lineType != null)) && (
-                      <th
+                      <SortableNativeTh
                         rowSpan={viewingQuotation.snapshot.displayColumns?.length ? 2 : 1}
+                        sortKey="type"
+                        sort={viewRowsSort}
+                        onSort={(k) => setViewRowsSort((s) => cycleSort(s, k as "country" | "type"))}
                         className="text-left px-4 py-2 text-xs font-semibold"
                       >
                         Type
-                      </th>
+                      </SortableNativeTh>
                     )}
                     {viewingQuotation.snapshot.displayColumns?.length ? (
                       (() => {
@@ -624,7 +712,7 @@ export default function CotizacionesGuardadas() {
                   )}
                 </thead>
                 <tbody>
-                  {viewingQuotation.snapshot.rows.map((row, idx) => (
+                  {viewDialogSortedRows.map((row, idx) => (
                     <tr key={idx} className="border-b border-border hover:bg-muted/20">
                       <td className="px-4 py-2 font-medium">{row.country}</td>
                       {(!isNewSnapshotFormat(viewingQuotation.snapshot) || viewingQuotation.snapshot.rows.some((r) => r.lineType != null)) && (
@@ -637,7 +725,7 @@ export default function CotizacionesGuardadas() {
                           const display = c?.rate ?? "";
                           return (
                             <td key={`${col.vendorId}-${col.rateType}`} className="px-4 py-2 border-l border-border font-mono text-xs">
-                              {typeof display === "number" ? display.toFixed(4) : "—"}
+                              {typeof display === "number" ? formatRate(display) : "—"}
                             </td>
                           );
                         })
@@ -649,7 +737,7 @@ export default function CotizacionesGuardadas() {
                             const display = c?.rate ?? "";
                             return (
                               <td key={`${v.id}-${t}`} className="px-4 py-2 border-l border-border font-mono text-xs">
-                                {typeof display === "number" ? display.toFixed(4) : "—"}
+                                {typeof display === "number" ? formatRate(display) : "—"}
                               </td>
                             );
                           });
@@ -696,7 +784,7 @@ export default function CotizacionesGuardadas() {
                                 const display = c?.ratePlusExtra ?? c?.rate;
                                 return (
                                   <td key={t} className="px-4 py-2 font-mono">
-                                    {display != null ? display.toFixed(4) : "—"}
+                                    {display != null ? formatRate(display) : "—"}
                                   </td>
                                 );
                               })}
@@ -735,10 +823,10 @@ export default function CotizacionesGuardadas() {
                               )}
                             </td>
                             <td className="px-4 py-2 font-mono">
-                              {c?.rate != null ? c.rate.toFixed(4) : "—"}
+                              {c?.rate != null ? formatRate(c.rate) : "—"}
                             </td>
                             <td className="px-4 py-2 font-mono">
-                              {c?.ratePlusExtra != null ? c.ratePlusExtra.toFixed(4) : "—"}
+                              {c?.ratePlusExtra != null ? formatRate(c.ratePlusExtra) : "—"}
                             </td>
                           </React.Fragment>
                         );
