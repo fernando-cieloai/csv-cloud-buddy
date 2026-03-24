@@ -1408,7 +1408,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                           </label>
                         ))}
                         {filteredCountries.length === 0 && (
-                          <p className="text-xs text-muted-foreground">{countriesSearch ? "No matches." : "No country data. Add countries in Countries."}</p>
+                          <p className="text-xs text-muted-foreground">{countriesSearch ? "No matches." : "No country data. Add countries in Master List."}</p>
                         )}
                       </div>
                     </>
@@ -1457,7 +1457,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                           </label>
                         ))}
                         {filteredGroups.length === 0 && (
-                          <p className="text-xs text-muted-foreground">{groupsSearch ? "No matches." : "No groups. Create groups in Countries."}</p>
+                          <p className="text-xs text-muted-foreground">{groupsSearch ? "No matches." : "No groups. Create groups under Countries in the navigation."}</p>
                         )}
                       </div>
                     </>

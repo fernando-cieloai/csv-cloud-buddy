@@ -8,6 +8,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  DialogTrigger,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -382,9 +383,12 @@ const AjustesPaises = () => {
       <div className="rounded-lg border border-border bg-card overflow-hidden">
       <div className="px-6 py-4 border-b border-border bg-muted/30 flex flex-wrap items-center justify-between gap-4">
         <div className="space-y-1">
-          <h1 className="text-2xl font-bold text-foreground">Countries & Groups</h1>
+          <h1 className="text-2xl font-bold text-foreground">Countries & groups</h1>
           <p className="text-sm text-muted-foreground max-w-xl">
-            Manage groups and assign countries when creating or editing a group. Countries are read-only on this page; they can only be added or edited from{" "}
+            Here you tie <span className="text-foreground/90 font-medium">countries</span> to <span className="text-foreground/90 font-medium">named groups</span> (for filtering, bundles, and quotations).
+            On the <span className="text-foreground/90 font-medium">Groups</span> tab, create or edit a group and choose which countries belong to it.
+            On the <span className="text-foreground/90 font-medium">Countries</span> tab, browse every country and see which groups it is in (read-only).
+            To add countries or rename them, use{" "}
             <Link to="/master-list" className="text-primary font-medium underline-offset-4 hover:underline">
               Master List
             </Link>
@@ -399,10 +403,11 @@ const AjustesPaises = () => {
               if (!open) resetGroupForm();
             }}
           >
-            <Button variant="outline" size="sm" className="h-9 shrink-0 inline-flex items-center gap-2" onClick={openCreateGroup} type="button">
-              <Plus className="w-3.5 h-3.5" />
-              Group
-            </Button>
+            <DialogTrigger asChild>
+              <Button type="button" size="sm" className="h-9 px-4 rounded-lg" onClick={openCreateGroup} aria-label="Create group">
+                <Plus className="w-4 h-4" />
+              </Button>
+            </DialogTrigger>
             <DialogContent>
               <DialogHeader>
                 <DialogTitle>{groupDialogTitle}</DialogTitle>
