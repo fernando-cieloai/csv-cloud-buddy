@@ -77,6 +77,14 @@ function getRateType(rate_type: string | null): RateType {
   return (match as RateType) ?? "International";
 }
 
+/** Alternating gray / white bands for quotation table column zones (segment 0 = gray). */
+const QT_STRIPE_GRAY = "bg-muted/70 dark:bg-muted/45";
+const QT_STRIPE_WHITE = "bg-background";
+
+function quotationStripeBg(segmentIndex: number): string {
+  return segmentIndex % 2 === 0 ? QT_STRIPE_GRAY : QT_STRIPE_WHITE;
+}
+
 interface SnapshotRow {
   country: string;
   lineType?: string;
@@ -157,7 +165,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
   const [saving, setSaving] = useState(false);
   const [page, setPage] = useState(1);
   const [pageSize] = useState(50);
-  const [totalCountries, setTotalCountries] = useState(0);
+  const [totalNetworkRows, setTotalNetworkRows] = useState(0);
   const [ratesLoading, setRatesLoading] = useState(false);
   const [exportingOrSaving, setExportingOrSaving] = useState(false);
   const [countriesSearch, setCountriesSearch] = useState("");
@@ -169,6 +177,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
   const [sellRatePerRow, setSellRatePerRow] = useState<Record<string, string>>({});
   const [quotationTableSort, setQuotationTableSort] = useState<SortState<string>>(null);
   const [hasApplied, setHasApplied] = useState(false);
+  const [onlyMasterListNetworks, setOnlyMasterListNetworks] = useState(false);
   const [createGroupDialogOpen, setCreateGroupDialogOpen] = useState(false);
   const [createGroupSource, setCreateGroupSource] = useState<"countries" | "groups">("countries");
   const [createGroupNombre, setCreateGroupNombre] = useState("");
@@ -206,7 +215,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
       setCountriesFromDb(countriesRes.data ?? []);
       setCountryGroupsFromDb(cgRes.data ?? []);
       setGroupsFromDb(groupsRes.data ?? []);
-      setTotalCountries(0);
+      setTotalNetworkRows(0);
       setPage(1);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Error loading data");
@@ -393,6 +402,12 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
     return selectedCountries;
   }, [filterMode, selectedGroups, countriesByGroupId, selectedCountries]);
 
+  /** Stable key so effects refetch when the set contents change (not only reference). */
+  const effectiveCountryFilterKey = useMemo(
+    () => [...effectiveCountryFilter].sort().join("\0"),
+    [effectiveCountryFilter],
+  );
+
   const toggleGroup = (groupId: string) => {
     setSelectedGroups((prev) => {
       const next = new Set(prev);
@@ -416,24 +431,14 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
     }
   };
 
-  const handleFilterModeChange = (value: string) => {
+  /** Countries and groups are exclusive: switching mode clears the other selection (no mixing). */
+  const handleFilterModeChange = (value: "countries" | "groups") => {
     if (value !== "countries" && value !== "groups") return;
     if (value === filterMode) return;
     if (value === "groups") {
-      const groupsToSelect = new Set<string>();
-      for (const g of groupsWithCount) {
-        const groupCountries = countriesByGroupId.get(g.id) ?? [];
-        if (groupCountries.length > 0 && groupCountries.every((c) => selectedCountries.has(c))) {
-          groupsToSelect.add(g.id);
-        }
-      }
-      setSelectedGroups(groupsToSelect);
+      setSelectedCountries(new Set());
     } else {
-      const countryNames = new Set<string>();
-      for (const gid of selectedGroups) {
-        for (const n of countriesByGroupId.get(gid) ?? []) countryNames.add(n);
-      }
-      setSelectedCountries(countryNames);
+      setSelectedGroups(new Set());
     }
     setFilterMode(value);
   };
@@ -476,6 +481,14 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
     }
     return Array.from(map.values());
   }, [selectedColumnsList]);
+
+  const vendorZoneBgByVendorId = useMemo(() => {
+    const m = new Map<string, string>();
+    columnsGroupedByVendor.forEach((g, i) => {
+      m.set(g.vendor.id, quotationStripeBg(i + 1));
+    });
+    return m;
+  }, [columnsGroupedByVendor]);
 
   const selectedColumnsSig = useMemo(
     () => selectedColumnsList.map((c) => `${c.vendor.id}\t${c.rateType}`).sort().join("|"),
@@ -520,12 +533,12 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
     const uploadIds = getUploadIdsForRates;
     if (uploadIds.length === 0) {
       setRates([]);
-      setTotalCountries(0);
+      setTotalNetworkRows(0);
       return;
     }
     if (effectiveCountryFilter.size === 0) {
       setRates([]);
-      setTotalCountries(0);
+      setTotalNetworkRows(0);
       return;
     }
     const id = ++fetchRatesRequestId.current;
@@ -549,7 +562,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
       let ratesErr: { message: string } | null = null;
 
       if (searchBy === "type") {
-        const countRes = await supabase.rpc("get_quotation_countries_count", rpcOpts);
+        const countRes = await supabase.rpc("get_quotation_networks_count", rpcOpts);
         countData = countRes.data;
         countErr = countRes.error;
         if (id !== fetchRatesRequestId.current) return;
@@ -563,7 +576,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
         ratesErr = ratesRes.error;
       } else {
         const [countRes, ratesRes] = await Promise.all([
-          supabase.rpc("get_quotation_countries_count", rpcOpts),
+          supabase.rpc("get_quotation_networks_count", rpcOpts),
           supabase.rpc("get_quotation_rates_page", {
             ...rpcOpts,
             p_limit: pageSize,
@@ -580,13 +593,13 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
       if (countErr) throw new Error(countErr.message);
       if (ratesErr) throw new Error(ratesErr.message);
 
-      setTotalCountries(Number(countData ?? 0));
+      setTotalNetworkRows(Number(countData ?? 0));
       setRates((ratesData ?? []) as AggregatedRateRow[]);
     } catch (err) {
       if (id !== fetchRatesRequestId.current) return;
       setError(err instanceof Error ? err.message : "Error loading rates");
       setRates([]);
-      setTotalCountries(0);
+      setTotalNetworkRows(0);
     } finally {
       if (id === fetchRatesRequestId.current) setRatesLoading(false);
     }
@@ -625,6 +638,8 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
       setSaveClientId(q.client_id ?? "__none__");
       const uniqueCountries = [...new Set((snap.rows ?? []).map((r) => r.country))];
       setSelectedCountries(new Set(uniqueCountries));
+      setSelectedGroups(new Set());
+      setFilterMode("countries");
       if (snap.psfFee) {
         setPsfFeeInput(String(snap.psfFee.value));
       }
@@ -644,7 +659,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
           );
         }
       }
-      setTotalCountries((snap.rows ?? []).length);
+      setTotalNetworkRows((snap.rows ?? []).length);
       setHasApplied(true);
       setLoading(false);
     })();
@@ -660,12 +675,19 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
     setPage(1);
   }, [effectiveCountryFilter, debouncedSearch, searchBy, selectedColumnPairs]);
 
+  /** Avoid showing previous filter’s rows/count while the new RPC is in flight. */
+  useEffect(() => {
+    if (editQuotationId) return;
+    setRates([]);
+    setTotalNetworkRows(0);
+  }, [effectiveCountryFilterKey, editQuotationId]);
+
   useEffect(() => {
     if (editQuotationId || !hasApplied) return;
     if (!loading && uploads.length > 0) {
       fetchRates();
     }
-  }, [loading, uploads.length, fetchRates, editQuotationId, hasApplied]);
+  }, [loading, uploads.length, fetchRates, editQuotationId, hasApplied, effectiveCountryFilterKey]);
 
   const toggleCountry = (country: string) => {
     setSelectedCountries((prev) => {
@@ -744,8 +766,10 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
     vendorList: Vendor[],
   ) => {
     const countryFilterLower = new Set([...countryFilter].map((c) => c.trim().toLowerCase()));
-    const countryMatches = (country: string) =>
-      countryFilter.size === 0 ? true : countryFilterLower.has(country?.trim().toLowerCase());
+    const countryMatches = (country: string | null | undefined) => {
+      const norm = (country ?? "").trim().toLowerCase();
+      return countryFilter.size === 0 ? true : countryFilterLower.has(norm);
+    };
     const keyToRow = new Map<
       string,
       { country: string; network: string; prefixKey: string; maxRate: number; fromMasterList: boolean; byVendor: Map<string, Partial<Record<RateType, VendorCellByType>>> }
@@ -777,8 +801,18 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
       cell.prefixes = [...new Set([...cell.prefixes, ...(row.prefixes ?? [])])];
       if (row.rate > cell.rate) cell.rate = row.rate;
     }
-    const list = Array.from(keyToRow.values()).filter((row) => row.byVendor.size > 0);
-    list.sort((a, b) => a.country.localeCompare(b.country) || a.network.localeCompare(b.network) || a.maxRate - b.maxRate);
+    let list = Array.from(keyToRow.values()).filter((row) => row.byVendor.size > 0);
+    if (countryFilter.size > 0) {
+      list = list.filter((row) => countryMatches(row.country));
+    }
+    list.sort((a, b) => {
+      const ca = (a.country ?? "").trim();
+      const cb = (b.country ?? "").trim();
+      const emptyA = !ca;
+      const emptyB = !cb;
+      if (emptyA !== emptyB) return emptyA ? 1 : -1;
+      return ca.localeCompare(cb) || a.network.localeCompare(b.network) || a.maxRate - b.maxRate;
+    });
     const networkLabel = new Map<string, string>();
     const seenPerCountry = new Map<string, Map<string, number>>();
     for (const row of list) {
@@ -869,7 +903,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
       effectiveCountryFilter.size > 0 ? Array.from(effectiveCountryFilter) : null;
     const searchVal = debouncedSearch.trim() || null;
     let allAggregated: AggregatedRateRow[] = [];
-    const pages = Math.ceil(totalCountries / pageSize) || 1;
+    const pages = Math.ceil(totalNetworkRows / pageSize) || 1;
     for (let i = 0; i < pages; i++) {
       const { data } = await supabase.rpc("get_quotation_rates_page", {
         p_upload_ids: uploadIds,
@@ -885,7 +919,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
   };
 
   const handleExportXlsx = async () => {
-    if (selectedColumnsList.length === 0 || totalCountries === 0) return;
+    if (selectedColumnsList.length === 0 || totalNetworkRows === 0) return;
     setExportingOrSaving(true);
     toast.info("Preparing export…");
     try {
@@ -983,7 +1017,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
   };
 
   const handleSaveQuotation = async () => {
-    if (selectedColumnsList.length === 0 || totalCountries === 0) return;
+    if (selectedColumnsList.length === 0 || totalNetworkRows === 0) return;
     setSaving(true);
     setExportingOrSaving(true);
     toast.info("Preparing save…");
@@ -1140,7 +1174,12 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
     [editQuotation, rates, effectiveCountryFilter, vendorListForTable, search, searchBy, uploadById]
   );
 
-  const totalPages = Math.max(1, Math.ceil(totalCountries / pageSize));
+  const tableRowsFilteredByMaster = useMemo(() => {
+    if (!onlyMasterListNetworks) return tableRows;
+    return tableRows.filter((r) => r.fromMasterList !== false);
+  }, [tableRows, onlyMasterListNetworks]);
+
+  const totalPages = Math.max(1, Math.ceil(totalNetworkRows / pageSize));
   const canPrev = page > 1;
   const canNext = page < totalPages;
 
@@ -1227,7 +1266,12 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
 
   const compareQuotationRows = useCallback(
     (a: QuotationTableRow, b: QuotationTableRow, key: string): number => {
-      if (key === "country") return compareText(a.country, b.country);
+      if (key === "country") {
+        const aEmpty = !(a.country ?? "").trim();
+        const bEmpty = !(b.country ?? "").trim();
+        if (aEmpty !== bEmpty) return aEmpty ? 1 : -1;
+        return compareText(a.country, b.country);
+      }
       if (key === "network") return compareText(a.networkLabel, b.networkLabel);
       if (key === "prefix")
         return compareText(getAllPrefixesForRow(a).join("\u0001"), getAllPrefixesForRow(b).join("\u0001"));
@@ -1320,13 +1364,39 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
   );
 
   const displayQuotationRows = useMemo(() => {
-    if (!quotationTableSort) return tableRows;
+    if (!quotationTableSort) return tableRowsFilteredByMaster;
     const { key, dir } = quotationTableSort;
     const m = dir === "asc" ? 1 : -1;
-    return [...tableRows].sort((a, b) => compareQuotationRows(a, b, key) * m);
-  }, [tableRows, quotationTableSort, compareQuotationRows]);
+    return [...tableRowsFilteredByMaster].sort((a, b) => compareQuotationRows(a, b, key) * m);
+  }, [tableRowsFilteredByMaster, quotationTableSort, compareQuotationRows]);
 
   const useQuotationCountryRowSpan = quotationTableSort === null;
+
+  const quotationCountryRowKey = (r: { country: string }) => (r.country ?? "").trim();
+
+  const distinctCountriesInTable = useMemo(
+    () => new Set(tableRows.map((r) => (r.country ?? "").trim()).filter(Boolean)).size,
+    [tableRows]
+  );
+
+  const quotationPaginationFooter = useMemo(() => {
+    const shown = Math.min(page * pageSize, totalNetworkRows) - (page - 1) * pageSize;
+    if (editQuotationId) {
+      return {
+        shown,
+        total: totalNetworkRows,
+        unit: "rows" as const,
+        title: `Saved quotation: ${totalNetworkRows} line(s) in the snapshot (one row per country/network). ${distinctCountriesInTable} distinct countr${distinctCountriesInTable === 1 ? "y" : "ies"}. That can differ from a group’s country count if this quotation was saved with a wider selection or multiple networks per country.`,
+      };
+    }
+    return {
+      shown,
+      total: totalNetworkRows,
+      unit: "networks" as const,
+      title:
+        "Pagination is by network row (each line is a country + network + rate type + rate from the uploads).",
+    };
+  }, [editQuotationId, page, pageSize, totalNetworkRows, distinctCountriesInTable]);
 
   if (loading) {
     return (
@@ -1374,10 +1444,22 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                   size="sm"
                   style={{ height: "32px" }}
                 >
-                  <span className="text-muted-foreground">
-                    {effectiveCountryFilter.size === 0
-                      ? `Select ${filterMode === "countries" ? "countries" : "groups"}`
-                      : `${effectiveCountryFilter.size} country(ies)`}
+                  <span className="text-muted-foreground truncate">
+                    {effectiveCountryFilter.size === 0 ? (
+                      `Select ${filterMode === "countries" ? "countries" : "groups"}`
+                    ) : filterMode === "groups" ? (
+                      <>
+                        {selectedGroups.size} group{selectedGroups.size === 1 ? "" : "s"}
+                        <span className="text-muted-foreground/80"> · </span>
+                        {effectiveCountryFilter.size}{" "}
+                        {effectiveCountryFilter.size === 1 ? "country" : "countries"}
+                      </>
+                    ) : (
+                      <>
+                        {effectiveCountryFilter.size}{" "}
+                        {effectiveCountryFilter.size === 1 ? "country" : "countries"}
+                      </>
+                    )}
                   </span>
                   <ChevronDown className="h-4 w-4 opacity-50" />
                 </Button>
@@ -1623,6 +1705,20 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
           <Button onClick={handleApply} size="sm" className="h-8 shrink-0">
             Apply
           </Button>
+          <div className="flex items-center gap-2 shrink-0 max-w-[14rem]">
+            <Checkbox
+              id="only-master-list-networks"
+              checked={onlyMasterListNetworks}
+              onCheckedChange={(v) => setOnlyMasterListNetworks(v === true)}
+            />
+            <Label
+              htmlFor="only-master-list-networks"
+              className="text-xs text-muted-foreground font-normal cursor-pointer leading-snug"
+              title="When on, hides rows whose network is not in the Master List"
+            >
+              Only Master List networks
+            </Label>
+          </div>
         </div>
       </div>
 
@@ -1859,7 +1955,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                 size="icon"
                 className="h-8 w-8"
                 onClick={() => void handleExportXlsx()}
-                disabled={selectedColumnsList.length === 0 || totalCountries === 0 || exportingOrSaving}
+                disabled={selectedColumnsList.length === 0 || totalNetworkRows === 0 || exportingOrSaving}
                 aria-label="Export XLSX"
               >
                 <FileDown className="w-3.5 h-3.5" />
@@ -1869,7 +1965,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                 size="icon"
                 className="h-8 w-8"
                 onClick={() => setSaveDialogOpen(true)}
-                disabled={selectedColumnsList.length === 0 || totalCountries === 0 || exportingOrSaving}
+                disabled={selectedColumnsList.length === 0 || totalNetworkRows === 0 || exportingOrSaving}
                 aria-label={editQuotationId ? "Update quotation" : "Save quotation"}
               >
                 <Save className="w-3.5 h-3.5" />
@@ -1890,7 +1986,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                     sortKey="country"
                     sort={quotationTableSort}
                     onSort={(k) => setQuotationTableSort((s) => cycleSort(s, k))}
-                    className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide bg-muted border-r border-border w-[6rem] min-w-[6rem]"
+                    className={`text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide border-r border-border w-[6rem] min-w-[6rem] ${quotationStripeBg(0)}`}
                   >
                     Country
                   </SortableNativeTh>
@@ -1899,7 +1995,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                     sortKey="network"
                     sort={quotationTableSort}
                     onSort={(k) => setQuotationTableSort((s) => cycleSort(s, k))}
-                    className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide bg-muted border-r-2 border-border min-w-[14rem]"
+                    className={`text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide border-r-2 border-border min-w-[14rem] ${quotationStripeBg(0)}`}
                   >
                     Network
                   </SortableNativeTh>
@@ -1908,7 +2004,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                     sortKey="prefix"
                     sort={quotationTableSort}
                     onSort={(k) => setQuotationTableSort((s) => cycleSort(s, k))}
-                    className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide bg-muted border-r-2 border-border min-w-[6rem]"
+                    className={`text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide border-r-2 border-border min-w-[6rem] ${quotationStripeBg(0)}`}
                   >
                     Prefix
                   </SortableNativeTh>
@@ -1916,7 +2012,9 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                     <th
                       key={g.vendor.id}
                       colSpan={g.rateTypes.length}
-                      className="text-center px-4 py-2.5 text-xs font-semibold text-muted-foreground bg-muted/80 border-l-2 border-border min-w-[8rem]"
+                      className={`text-center px-4 py-2.5 text-xs font-semibold text-muted-foreground border-l-2 border-border min-w-[8rem] ${
+                        vendorZoneBgByVendorId.get(g.vendor.id) ?? quotationStripeBg(1)
+                      }`}
                     >
                       {g.vendor.nombre}
                     </th>
@@ -1926,7 +2024,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                     sortKey="lcrVendor"
                     sort={quotationTableSort}
                     onSort={(k) => setQuotationTableSort((s) => cycleSort(s, k))}
-                    className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide bg-muted/50 border-l-2 border-border min-w-[6rem]"
+                    className={`text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide border-l-2 border-border min-w-[6rem] ${quotationStripeBg(columnsGroupedByVendor.length + 1)}`}
                   >
                     LCR Vendor
                   </SortableNativeTh>
@@ -1935,7 +2033,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                     sortKey="lcrRate"
                     sort={quotationTableSort}
                     onSort={(k) => setQuotationTableSort((s) => cycleSort(s, k))}
-                    className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide bg-muted/50 border-l border-border min-w-[5rem]"
+                    className={`text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide border-l border-border min-w-[5rem] ${quotationStripeBg(columnsGroupedByVendor.length + 1)}`}
                   >
                     LCR Rate
                   </SortableNativeTh>
@@ -1944,7 +2042,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                     sortKey="selVendor"
                     sort={quotationTableSort}
                     onSort={(k) => setQuotationTableSort((s) => cycleSort(s, k))}
-                    className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide bg-muted/50 border-l border-border min-w-[6rem]"
+                    className={`text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide border-l border-border min-w-[6rem] ${quotationStripeBg(columnsGroupedByVendor.length + 2)}`}
                   >
                     Selected Vendor
                   </SortableNativeTh>
@@ -1953,7 +2051,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                     sortKey="selRate"
                     sort={quotationTableSort}
                     onSort={(k) => setQuotationTableSort((s) => cycleSort(s, k))}
-                    className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide bg-muted/50 border-l border-border min-w-[5rem]"
+                    className={`text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide border-l border-border min-w-[5rem] ${quotationStripeBg(columnsGroupedByVendor.length + 2)}`}
                   >
                     Rate
                   </SortableNativeTh>
@@ -1962,7 +2060,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                     sortKey="psf"
                     sort={quotationTableSort}
                     onSort={(k) => setQuotationTableSort((s) => cycleSort(s, k))}
-                    className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground bg-muted/50 border-l border-border min-w-[6rem]"
+                    className={`text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground border-l border-border min-w-[6rem] ${quotationStripeBg(columnsGroupedByVendor.length + 2)}`}
                   >
                     PSF
                   </SortableNativeTh>
@@ -1971,7 +2069,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                     sortKey="cost"
                     sort={quotationTableSort}
                     onSort={(k) => setQuotationTableSort((s) => cycleSort(s, k))}
-                    className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground bg-muted/50 border-l border-border min-w-[5rem]"
+                    className={`text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground border-l border-border min-w-[5rem] ${quotationStripeBg(columnsGroupedByVendor.length + 2)}`}
                   >
                     Cost
                   </SortableNativeTh>
@@ -1980,7 +2078,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                     sortKey="markupAmt"
                     sort={quotationTableSort}
                     onSort={(k) => setQuotationTableSort((s) => cycleSort(s, k))}
-                    className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground bg-muted/50 border-l border-border min-w-[5rem]"
+                    className={`text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground border-l border-border min-w-[5rem] ${quotationStripeBg(columnsGroupedByVendor.length + 2)}`}
                   >
                     Markup
                   </SortableNativeTh>
@@ -1989,7 +2087,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                     sortKey="margin"
                     sort={quotationTableSort}
                     onSort={(k) => setQuotationTableSort((s) => cycleSort(s, k))}
-                    className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground bg-muted/50 border-l border-border min-w-[5rem]"
+                    className={`text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground border-l border-border min-w-[5rem] ${quotationStripeBg(columnsGroupedByVendor.length + 2)}`}
                   >
                     Margin
                   </SortableNativeTh>
@@ -1998,7 +2096,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                     sortKey="marginPct"
                     sort={quotationTableSort}
                     onSort={(k) => setQuotationTableSort((s) => cycleSort(s, k))}
-                    className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground bg-muted/50 border-l border-border min-w-[7rem] whitespace-nowrap"
+                    className={`text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground border-l border-border min-w-[7rem] whitespace-nowrap ${quotationStripeBg(columnsGroupedByVendor.length + 2)}`}
                   >
                     Margin %
                   </SortableNativeTh>
@@ -2007,7 +2105,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                     sortKey="sellRate"
                     sort={quotationTableSort}
                     onSort={(k) => setQuotationTableSort((s) => cycleSort(s, k))}
-                    className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground bg-muted/50 border-l border-border min-w-[8rem]"
+                    className={`text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground border-l border-border min-w-[8rem] ${quotationStripeBg(columnsGroupedByVendor.length + 2)}`}
                   >
                     Sell Rate
                   </SortableNativeTh>
@@ -2020,7 +2118,9 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                         sortKey={`rate:\t${g.vendor.id}\t${t}`}
                         sort={quotationTableSort}
                         onSort={(k) => setQuotationTableSort((s) => cycleSort(s, k))}
-                        className="text-left px-4 py-1.5 text-[10px] font-normal text-muted-foreground bg-muted/50 border-l border-border min-w-[5.5rem]"
+                        className={`text-left px-4 py-1.5 text-[10px] font-normal text-muted-foreground border-l border-border min-w-[5.5rem] ${
+                          vendorZoneBgByVendorId.get(g.vendor.id) ?? quotationStripeBg(1)
+                        }`}
                       >
                         {t}
                       </SortableNativeTh>
@@ -2054,9 +2154,14 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                     let countryStart = true;
                     let countrySpan = 1;
                     if (useQuotationCountryRowSpan) {
-                      countryStart = idx === 0 || displayQuotationRows[idx - 1].country !== row.country;
+                      countryStart =
+                        idx === 0 ||
+                        quotationCountryRowKey(displayQuotationRows[idx - 1]) !==
+                          quotationCountryRowKey(row);
                       countrySpan = countryStart
-                        ? displayQuotationRows.filter((r) => r.country === row.country).length
+                        ? displayQuotationRows.filter(
+                            (r) => quotationCountryRowKey(r) === quotationCountryRowKey(row),
+                          ).length
                         : 0;
                     }
                     return (
@@ -2064,13 +2169,13 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                         {countryStart ? (
                           <td
                             rowSpan={useQuotationCountryRowSpan ? countrySpan : undefined}
-                            className="px-4 py-2.5 text-foreground align-middle bg-muted/30 border-r border-border font-medium"
+                            className={`px-4 py-2.5 text-foreground align-middle border-r border-border font-medium ${quotationStripeBg(0)}`}
                           >
-                            {row.country}
+                            {row.country?.trim() ? row.country : "—"}
                           </td>
                         ) : null}
                         <td
-                          className="px-4 py-2.5 text-muted-foreground align-top bg-muted/20 border-r-2 border-border text-xs font-medium min-w-[14rem]"
+                          className={`px-4 py-2.5 text-muted-foreground align-top border-r-2 border-border text-xs font-medium min-w-[14rem] ${quotationStripeBg(0)}`}
                         >
                           <span className="inline-flex items-center gap-1.5">
                             {row.fromMasterList === false && (
@@ -2088,7 +2193,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                             {row.networkLabel}
                           </span>
                         </td>
-                        <td className="px-4 py-2.5 text-muted-foreground align-top bg-muted/20 border-r-2 border-border text-xs min-w-[6rem]">
+                        <td className={`px-4 py-2.5 text-muted-foreground align-top border-r-2 border-border text-xs min-w-[6rem] ${quotationStripeBg(0)}`}>
                           {(() => {
                             const prefixes = getAllPrefixesForRow(row);
                             if (prefixes.length === 0) return <span className="italic">—</span>;
@@ -2114,10 +2219,11 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                           const byType = row.byVendor.get(col.vendor.id);
                           const cell = byType?.[col.rateType];
                           const rate = cell?.rate;
+                          const vz = vendorZoneBgByVendorId.get(col.vendor.id) ?? quotationStripeBg(1);
                           return (
                             <td
                               key={col.vendor.id + col.rateType}
-                              className="px-4 py-2.5 border-l-2 border-border bg-card/50 min-w-[5.5rem]"
+                              className={`px-4 py-2.5 border-l-2 border-border min-w-[5.5rem] ${vz}`}
                             >
                               {rate != null ? (
                                 <span className="font-mono text-foreground">{formatRateFull(rate)}</span>
@@ -2160,17 +2266,23 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                           const markupAmount = getMarkupAmountOnRate(selectedRate);
                           return (
                             <>
-                              <td className="px-4 py-2.5 border-l-2 border-border bg-card/50 font-medium">
+                              <td
+                                className={`px-4 py-2.5 border-l-2 border-border font-medium ${quotationStripeBg(columnsGroupedByVendor.length + 1)}`}
+                              >
                                 {bestVendorName && bestRateType ? `${bestVendorName} - ${bestRateType}` : "—"}
                               </td>
-                              <td className="px-4 py-2.5 font-mono border-l border-border bg-card/50 min-w-[5rem]">
+                              <td
+                                className={`px-4 py-2.5 font-mono border-l border-border min-w-[5rem] ${quotationStripeBg(columnsGroupedByVendor.length + 1)}`}
+                              >
                                 {bestRate != null ? (
                                   <span className="text-foreground">{formatRateFull(bestRate)}</span>
                                 ) : (
                                   <span className="text-muted-foreground italic">—</span>
                                 )}
                               </td>
-                              <td className="px-2 py-2 border-l border-border bg-card/50 align-top">
+                              <td
+                                className={`px-2 py-2 border-l border-border align-top ${quotationStripeBg(columnsGroupedByVendor.length + 2)}`}
+                              >
                                 <Select
                                   value={selectedKey || bestKey || ""}
                                   onValueChange={(val) =>
@@ -2193,35 +2305,45 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                                   </SelectContent>
                                 </Select>
                               </td>
-                              <td className="px-4 py-2.5 font-mono border-l border-border bg-card/50 min-w-[5rem]">
+                              <td
+                                className={`px-4 py-2.5 font-mono border-l border-border min-w-[5rem] ${quotationStripeBg(columnsGroupedByVendor.length + 2)}`}
+                              >
                                 {selectedRate != null ? (
                                   <span className="text-foreground">{formatRateFull(selectedRate)}</span>
                                 ) : (
                                   <span className="text-muted-foreground italic">—</span>
                                 )}
                               </td>
-                              <td className="px-4 py-2.5 font-mono border-l border-border bg-muted/30 min-w-[6rem]">
+                              <td
+                                className={`px-4 py-2.5 font-mono border-l border-border min-w-[6rem] ${quotationStripeBg(columnsGroupedByVendor.length + 2)}`}
+                              >
                                 {psfAmount != null ? (
                                   <span className="text-foreground">{formatRateFull(psfAmount)}</span>
                                 ) : (
                                   <span className="text-muted-foreground italic">—</span>
                                 )}
                               </td>
-                              <td className="px-4 py-2.5 font-mono border-l border-border bg-muted/30 min-w-[5rem]">
+                              <td
+                                className={`px-4 py-2.5 font-mono border-l border-border min-w-[5rem] ${quotationStripeBg(columnsGroupedByVendor.length + 2)}`}
+                              >
                                 {cost != null ? (
                                   <span className="text-foreground">{formatRateFull(cost)}</span>
                                 ) : (
                                   <span className="text-muted-foreground italic">—</span>
                                 )}
                               </td>
-                              <td className="px-4 py-2.5 font-mono border-l border-border bg-muted/30 min-w-[5rem]">
+                              <td
+                                className={`px-4 py-2.5 font-mono border-l border-border min-w-[5rem] ${quotationStripeBg(columnsGroupedByVendor.length + 2)}`}
+                              >
                                 {markupAmount != null ? (
                                   <span className="text-foreground">{formatRateFull(markupAmount)}</span>
                                 ) : (
                                   <span className="text-muted-foreground italic">—</span>
                                 )}
                               </td>
-                              <td className="px-4 py-2.5 font-mono border-l border-border bg-muted/30 min-w-[5rem]">
+                              <td
+                                className={`px-4 py-2.5 font-mono border-l border-border min-w-[5rem] ${quotationStripeBg(columnsGroupedByVendor.length + 2)}`}
+                              >
                                 {netMargin != null ? (
                                   <span
                                     className={
@@ -2238,7 +2360,9 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                                   <span className="text-muted-foreground italic">—</span>
                                 )}
                               </td>
-                              <td className="px-4 py-2.5 font-mono border-l border-border bg-muted/30 min-w-[7rem] text-xs whitespace-nowrap">
+                              <td
+                                className={`px-4 py-2.5 font-mono border-l border-border min-w-[7rem] text-xs whitespace-nowrap ${quotationStripeBg(columnsGroupedByVendor.length + 2)}`}
+                              >
                                 {marginOnCostPct != null ? (
                                   <span
                                     className={
@@ -2255,7 +2379,9 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                                   <span className="text-muted-foreground italic">—</span>
                                 )}
                               </td>
-                              <td className="px-4 py-2 border-l border-border bg-card/50 min-w-[8rem]">
+                              <td
+                                className={`px-4 py-2 border-l border-border min-w-[8rem] ${quotationStripeBg(columnsGroupedByVendor.length + 2)}`}
+                              >
                                 {cost != null ? (
                                   <Input
                                     type="text"
@@ -2291,9 +2417,25 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
               </tbody>
             </table>
           </div>
-          {totalCountries > 0 && (
+          {totalNetworkRows > 0 && (
             <div className="flex items-center justify-between gap-4 px-4 py-2 border-t border-border bg-muted/30 text-sm text-muted-foreground">
-              <span>{Math.min(page * pageSize, totalCountries) - (page - 1) * pageSize} of {totalCountries} items</span>
+              <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                <span title={quotationPaginationFooter.title}>
+                  {quotationPaginationFooter.shown} of {quotationPaginationFooter.total}{" "}
+                  {quotationPaginationFooter.unit}
+                  {editQuotationId && distinctCountriesInTable !== totalNetworkRows ? (
+                    <span className="text-xs opacity-90">
+                      {" "}
+                      ({distinctCountriesInTable} distinct {distinctCountriesInTable === 1 ? "country" : "countries"})
+                    </span>
+                  ) : null}
+                </span>
+                {onlyMasterListNetworks && tableRows.length > 0 && (
+                  <span className="text-xs opacity-90">
+                    ({displayQuotationRows.length} of {tableRows.length} rows on this page match Master List)
+                  </span>
+                )}
+              </span>
               <div className="flex items-center gap-2">
               <span className="min-w-[4rem] text-center">{page} / {totalPages}</span>
               <Button

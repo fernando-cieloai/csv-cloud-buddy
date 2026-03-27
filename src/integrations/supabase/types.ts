@@ -80,18 +80,21 @@ export type Database = {
           file_name: string
           created_at: string
           vendor_id: string | null
+          upload_mode: string
         }
         Insert: {
           id?: string
           file_name: string
           created_at?: string
           vendor_id?: string | null
+          upload_mode?: string
         }
         Update: {
           id?: string
           file_name?: string
           created_at?: string
           vendor_id?: string | null
+          upload_mode?: string
         }
         Relationships: [
           { foreignKeyName: "csv_uploads_vendor_id_fkey"; columns: ["vendor_id"]; referencedRelation: "vendors"; referencedColumns: ["id"] }
@@ -219,6 +222,7 @@ export type Database = {
           rate: number
           rate_type: string
           upload_id: string
+          comment: string | null
         }
         Insert: {
           country: string
@@ -229,6 +233,7 @@ export type Database = {
           rate: number
           rate_type?: string
           upload_id: string
+          comment?: string | null
         }
         Update: {
           country?: string
@@ -239,6 +244,7 @@ export type Database = {
           rate?: number
           rate_type?: string
           upload_id?: string
+          comment?: string | null
         }
         Relationships: [
           { foreignKeyName: "phone_rates_upload_id_fkey"; columns: ["upload_id"]; referencedRelation: "csv_uploads"; referencedColumns: ["id"] }

@@ -14,6 +14,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Label } from "@/components/ui/label";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import {
   Select,
   SelectContent,
@@ -22,9 +23,30 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
-import { roundUpTo3Decimals, formatRate } from "@/lib/utils";
-import { SortableNativeTh } from "@/components/ui/sortable-native-th";
-import { cycleSort, compareText, compareNumber, type SortState } from "@/lib/tableSort";
+import { roundUpTo3Decimals } from "@/lib/utils";
+import { compareText } from "@/lib/tableSort";
+
+/** Canonical values for the optional CSV/XLSX `comment` column (merge mode). */
+const UPLOAD_COMMENT = {
+  NO_CHANGES: "No changes",
+  INCREMENT: "Increment",
+  DECREMENT: "Decrement",
+  NEW_BRAND: "New brand",
+} as const;
+
+type UploadCommentKey = keyof typeof UPLOAD_COMMENT;
+
+function normalizeUploadComment(raw: string | undefined | null): UploadCommentKey | "empty" | null {
+  const t = String(raw ?? "")
+    .trim()
+    .toLowerCase();
+  if (!t) return "empty";
+  if (t === "no changes" || t === "no change") return "NO_CHANGES";
+  if (t === "increment") return "INCREMENT";
+  if (t === "decrement") return "DECREMENT";
+  if (t === "new brand" || t === "newbrand") return "NEW_BRAND";
+  return null;
+}
 
 interface PhoneRate {
   country: string;
@@ -32,11 +54,30 @@ interface PhoneRate {
   prefix: string;
   rate: number;
   rate_type?: string;
+  /** Optional column: No changes | Increment | Decrement | New brand */
+  comment?: string;
+}
+
+function commentForStorage(row: PhoneRate): string | null {
+  const norm = normalizeUploadComment(row.comment);
+  if (norm === null) return row.comment?.trim() || null;
+  if (norm === "empty") return null;
+  return UPLOAD_COMMENT[norm];
+}
+
+/** Values read from the file when a row fails validation (for error export). */
+interface ParseErrorRaw {
+  country: string;
+  network: string;
+  prefix: string;
+  rate: string;
+  comment: string;
 }
 
 interface ParseError {
   row: number;
   message: string;
+  raw?: ParseErrorRaw;
 }
 
 type UploadStatus = "idle" | "parsing" | "confirming" | "uploading" | "success" | "error";
@@ -65,18 +106,50 @@ function parseCSV(text: string): { data: PhoneRate[]; errors: ParseError[] } {
     const prefix = colMap["prefix"] >= 0 ? cols[colMap["prefix"]] : cols[2];
     const rateRaw = colMap["price"] >= 0 ? cols[colMap["price"]] : cols[3];
 
+    const commentRawEarly = colMap["comment"] >= 0 ? cols[colMap["comment"]] : undefined;
+
     if (!country || !network || !prefix || !rateRaw) {
-      errors.push({ row: i + 1, message: `Row ${i + 1}: incomplete data.` });
+      errors.push({
+        row: i + 1,
+        message: `Row ${i + 1}: incomplete data.`,
+        raw: {
+          country: country || "",
+          network: network || "",
+          prefix: prefix || "",
+          rate: rateRaw || "",
+          comment: commentRawEarly?.trim() ?? "",
+        },
+      });
       continue;
     }
 
     const rate = parseFloat(rateRaw);
     if (isNaN(rate)) {
-      errors.push({ row: i + 1, message: `Row ${i + 1}: invalid rate "${rateRaw}".` });
+      errors.push({
+        row: i + 1,
+        message: `Row ${i + 1}: invalid rate "${rateRaw}".`,
+        raw: {
+          country: country || "",
+          network: network || "",
+          prefix: prefix || "",
+          rate: String(rateRaw),
+          comment: commentRawEarly?.trim() ?? "",
+        },
+      });
       continue;
     }
 
-    data.push({ country, network, prefix, rate: roundUpTo3Decimals(rate), rate_type: "International" });
+    const commentRaw = colMap["comment"] >= 0 ? cols[colMap["comment"]] : undefined;
+    const comment = commentRaw?.trim() || undefined;
+
+    data.push({
+      country,
+      network,
+      prefix,
+      rate: roundUpTo3Decimals(rate),
+      rate_type: "International",
+      ...(comment ? { comment } : {}),
+    });
   }
 
   return { data, errors };
@@ -87,6 +160,7 @@ const COL_PAIRS: [string, string[]][] = [
   ["phone company", ["phone company", "network", "network/description", "network description", "network_description"]],
   ["prefix", ["prefix"]],
   ["price", ["price", "rate"]],
+  ["comment", ["comment", "change", "change type", "status"]],
 ];
 
 /** Same normalization as master list `region_code` lookup in `doUpload`. */
@@ -159,10 +233,30 @@ function parseSheetRows(
     if (!country || !network || !prefix || rateRaw === undefined || rateRaw === "") continue;
     const rate = parseFloat(rateRaw);
     if (isNaN(rate)) {
-      errors.push({ row: i + 1, message: `Sheet "${sheetType}" row ${i + 1}: invalid rate "${rateRaw}".` });
+      const commentForErr = colMap["comment"] >= 0 ? cols[colMap["comment"]] : "";
+      errors.push({
+        row: i + 1,
+        message: `Sheet "${sheetType}" row ${i + 1}: invalid rate "${rateRaw}".`,
+        raw: {
+          country: country || "",
+          network: network || "",
+          prefix: prefix || "",
+          rate: String(rateRaw),
+          comment: String(commentForErr ?? "").trim(),
+        },
+      });
       continue;
     }
-    data.push({ country, network, prefix, rate: roundUpTo3Decimals(rate), rate_type: sheetType });
+    const commentRaw = colMap["comment"] >= 0 ? cols[colMap["comment"]] : undefined;
+    const comment = commentRaw?.trim() || undefined;
+    data.push({
+      country,
+      network,
+      prefix,
+      rate: roundUpTo3Decimals(rate),
+      rate_type: sheetType,
+      ...(comment ? { comment } : {}),
+    });
   }
   return data;
 }
@@ -241,6 +335,59 @@ function buildMissingMasterPrefixesFilename(vendorBase: string, dateSlug: string
   return `${sanitizeFilenameBase(vendorBase)}-missing-master-prefixes-${dateSlug}.xlsx`;
 }
 
+function buildParseErrorsFilename(sourceBase: string, dateSlug: string): string {
+  return `${sanitizeFilenameBase(sourceBase)}-parse-errors-${dateSlug}.xlsx`;
+}
+
+function buildInvalidCommentFilename(sourceBase: string, dateSlug: string): string {
+  return `${sanitizeFilenameBase(sourceBase)}-invalid-comment-${dateSlug}.xlsx`;
+}
+
+function downloadParseErrorsXlsx(errors: ParseError[], sourceFileName: string | null) {
+  const base = (sourceFileName ?? "import").replace(/\.[^.]+$/i, "");
+  const dateSlug = formatExportDateSlug();
+  const header = ["row", "country", "network", "prefix", "rate", "comment", "error"] as const;
+  const aoa: string[][] = [
+    [...header],
+    ...errors.map((e) => [
+      String(e.row),
+      e.raw?.country ?? "",
+      e.raw?.network ?? "",
+      e.raw?.prefix ?? "",
+      e.raw?.rate ?? "",
+      e.raw?.comment ?? "",
+      e.message,
+    ]),
+  ];
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Parse errors");
+  XLSX.writeFile(wb, buildParseErrorsFilename(base, dateSlug));
+}
+
+function downloadInvalidCommentRowsXlsx(rows: PhoneRate[], sourceFileName: string | null) {
+  if (rows.length === 0) return;
+  const base = (sourceFileName ?? "import").replace(/\.[^.]+$/i, "");
+  const dateSlug = formatExportDateSlug();
+  const header = ["country", "network", "prefix", "rate", "rate_type", "comment", "error"] as const;
+  const aoa: string[][] = [
+    [...header],
+    ...rows.map((r) => [
+      r.country,
+      r.network,
+      r.prefix,
+      String(r.rate),
+      r.rate_type ?? "",
+      r.comment ?? "",
+      "Invalid comment — use: No changes, Increment, Decrement, New brand",
+    ]),
+  ];
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Invalid comment");
+  XLSX.writeFile(wb, buildInvalidCommentFilename(base, dateSlug));
+}
+
 export default function CsvUploader({ vendorId, vendorName: vendorNameProp, onSuccess, compact = false }: CsvUploaderProps) {
   const [status, setStatus] = useState<UploadStatus>("idle");
   const [fileName, setFileName] = useState<string | null>(null);
@@ -251,27 +398,20 @@ export default function CsvUploader({ vendorId, vendorName: vendorNameProp, onSu
   const [vendors, setVendors] = useState<Vendor[]>([]);
   const [selectedVendorId, setSelectedVendorId] = useState<string | null>(vendorId ?? null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [previewSort, setPreviewSort] = useState<SortState<"country" | "network" | "prefix" | "rate">>(null);
+  const [uploadMode, setUploadMode] = useState<"replace" | "merge">("replace");
+  const [mergeSummary, setMergeSummary] = useState<{
+    inserted: number;
+    updated: number;
+    skipped: number;
+    invalid: number;
+  } | null>(null);
+  const [mergeInvalidRows, setMergeInvalidRows] = useState<PhoneRate[]>([]);
   const [missingMasterReport, setMissingMasterReport] = useState<{
     distinctPrefixCount: number;
     rowCount: number;
     rows: MissingMasterPrefixRow[];
     exportDateSlug: string;
   } | null>(null);
-
-  const sortedPreviewRows = useMemo(() => {
-    if (!previewSort || parsedData.length === 0) return parsedData;
-    const { key, dir } = previewSort;
-    const m = dir === "asc" ? 1 : -1;
-    return [...parsedData].sort((a, b) => {
-      let c = 0;
-      if (key === "country") c = compareText(a.country, b.country);
-      else if (key === "network") c = compareText(a.network, b.network);
-      else if (key === "prefix") c = compareText(a.prefix, b.prefix);
-      else c = compareNumber(a.rate, b.rate);
-      return c * m;
-    });
-  }, [parsedData, previewSort]);
 
   useEffect(() => {
     if (vendorId) setSelectedVendorId(vendorId);
@@ -313,6 +453,12 @@ export default function CsvUploader({ vendorId, vendorName: vendorNameProp, onSu
     }
   }, [vendorId, selectedVendorId, enabledVendorIds]);
 
+  useEffect(() => {
+    if (status === "confirming" && uploadMode === "merge" && !selectedVendorId) {
+      setUploadMode("replace");
+    }
+  }, [status, uploadMode, selectedVendorId]);
+
   const resetState = () => {
     setStatus("idle");
     setFileName(null);
@@ -320,6 +466,9 @@ export default function CsvUploader({ vendorId, vendorName: vendorNameProp, onSu
     setParseErrors([]);
     setUploadedCount(0);
     setMissingMasterReport(null);
+    setUploadMode("replace");
+    setMergeSummary(null);
+    setMergeInvalidRows([]);
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
@@ -349,8 +498,16 @@ export default function CsvUploader({ vendorId, vendorName: vendorNameProp, onSu
     XLSX.writeFile(wb, buildMissingMasterPrefixesFilename(vendorDisplayNameForExport, dateSlug));
   };
 
-  const doUpload = async (data: PhoneRate[], name: string) => {
+  const doUpload = async (data: PhoneRate[], name: string, mode: "replace" | "merge") => {
     setStatus("uploading");
+    setMergeSummary(null);
+    setMergeInvalidRows([]);
+
+    if (mode === "merge" && !selectedVendorId) {
+      toast.error("Merge (field update) requires a vendor.");
+      setStatus("error");
+      return;
+    }
 
     const prefixToCountry = new Map<string, string>();
     let offset = 0;
@@ -398,86 +555,280 @@ export default function CsvUploader({ vendorId, vendorName: vendorNameProp, onSu
       return prefixToCountry.get(normalized) ?? vendorCountry;
     };
 
-    if (selectedVendorId) {
-      const { data: existing } = await supabase
-        .from("csv_uploads")
-        .select("id")
-        .eq("vendor_id", selectedVendorId);
-      if (existing?.length) {
-        for (const row of existing) {
-          await supabase.from("csv_uploads").delete().eq("id", row.id);
+    const rateRowKey = (country: string, network: string, prefix: string, rateType: string) =>
+      `${country}\t${network}\t${prefix}\t${rateType}`;
+
+    const BATCH = 100;
+
+    const insertAllRows = async (uploadId: string, rows: PhoneRate[]) => {
+      let total = 0;
+      for (let i = 0; i < rows.length; i += BATCH) {
+        const batch = rows.slice(i, i + BATCH).map((row) => ({
+          country: resolveCountry(row.prefix, row.country),
+          network: row.network,
+          prefix: row.prefix,
+          rate: row.rate,
+          rate_type: row.rate_type ?? "International",
+          upload_id: uploadId,
+          comment: commentForStorage(row),
+        }));
+        const { error } = await supabase.from("phone_rates").insert(batch);
+        if (error) {
+          setParseErrors((prev) => [...prev, { row: -1, message: `Save error: ${error.message}` }]);
+          setStatus("error");
+          return false;
+        }
+        total += batch.length;
+        setUploadedCount(total);
+      }
+      return true;
+    };
+
+    const finishSuccess = () => {
+      const exportDateSlug = formatExportDateSlug();
+      setMissingMasterReport(
+        distinctMissingPrefixes.size > 0
+          ? {
+              distinctPrefixCount: distinctMissingPrefixes.size,
+              rowCount: rowsWithMissingPrefix,
+              rows: missingRowsSorted,
+              exportDateSlug,
+            }
+          : {
+              distinctPrefixCount: 0,
+              rowCount: 0,
+              rows: [],
+              exportDateSlug,
+            },
+      );
+      setStatus("success");
+      if (distinctMissingPrefixes.size > 0) {
+        toast.warning(
+          `${distinctMissingPrefixes.size} prefix${distinctMissingPrefixes.size === 1 ? "" : "es"} not in Master List (${rowsWithMissingPrefix} row${rowsWithMissingPrefix === 1 ? "" : "s"}). You can download a report below.`,
+          { duration: 12000 },
+        );
+      }
+      onSuccess?.();
+    };
+
+    if (mode === "replace") {
+      if (selectedVendorId) {
+        const { data: existing } = await supabase
+          .from("csv_uploads")
+          .select("id")
+          .eq("vendor_id", selectedVendorId);
+        if (existing?.length) {
+          for (const row of existing) {
+            await supabase.from("csv_uploads").delete().eq("id", row.id);
+          }
         }
       }
-    }
 
-    const { data: uploadRow, error: uploadError } = await supabase
-      .from("csv_uploads")
-      .insert({
-        file_name: name,
-        vendor_id: selectedVendorId || null,
-      })
-      .select("id")
-      .single();
+      const { data: uploadRow, error: uploadError } = await supabase
+        .from("csv_uploads")
+        .insert({
+          file_name: name,
+          vendor_id: selectedVendorId || null,
+          upload_mode: "replace",
+        })
+        .select("id")
+        .single();
 
-    if (uploadError || !uploadRow?.id) {
-      setParseErrors((prev) => [
-        ...prev,
-        { row: -1, message: `Save error: ${uploadError?.message ?? "Could not create upload"}` },
-      ]);
-      setStatus("error");
-      return;
-    }
-
-    const uploadId = uploadRow.id;
-    const BATCH = 100;
-    let total = 0;
-
-    for (let i = 0; i < data.length; i += BATCH) {
-      const batch = data.slice(i, i + BATCH).map((row) => ({
-        country: resolveCountry(row.prefix, row.country),
-        network: row.network,
-        prefix: row.prefix,
-        rate: row.rate,
-        rate_type: row.rate_type ?? "International",
-        upload_id: uploadId,
-      }));
-      const { error } = await supabase.from("phone_rates").insert(batch);
-      if (error) {
+      if (uploadError || !uploadRow?.id) {
         setParseErrors((prev) => [
           ...prev,
-          { row: -1, message: `Save error: ${error.message}` },
+          { row: -1, message: `Save error: ${uploadError?.message ?? "Could not create upload"}` },
         ]);
         setStatus("error");
         return;
       }
-      total += batch.length;
-      setUploadedCount(total);
+
+      const ok = await insertAllRows(uploadRow.id, data);
+      if (!ok) return;
+      setUploadedCount(data.length);
+      await finishSuccess();
+      return;
     }
 
-    const exportDateSlug = formatExportDateSlug();
-    setMissingMasterReport(
-      distinctMissingPrefixes.size > 0
-        ? {
-            distinctPrefixCount: distinctMissingPrefixes.size,
-            rowCount: rowsWithMissingPrefix,
-            rows: missingRowsSorted,
-            exportDateSlug,
-          }
-        : {
-            distinctPrefixCount: 0,
-            rowCount: 0,
-            rows: [],
-            exportDateSlug,
+    // merge
+    const { data: existingUpload } = await supabase
+      .from("csv_uploads")
+      .select("id")
+      .eq("vendor_id", selectedVendorId!)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (!existingUpload?.id) {
+      const { data: uploadRow, error: uploadError } = await supabase
+        .from("csv_uploads")
+        .insert({
+          file_name: name,
+          vendor_id: selectedVendorId!,
+          upload_mode: "merge",
+        })
+        .select("id")
+        .single();
+
+      if (uploadError || !uploadRow?.id) {
+        setParseErrors((prev) => [
+          ...prev,
+          { row: -1, message: `Save error: ${uploadError?.message ?? "Could not create upload"}` },
+        ]);
+        setStatus("error");
+        return;
+      }
+
+      const ok = await insertAllRows(uploadRow.id, data);
+      if (!ok) return;
+      setUploadedCount(data.length);
+      setMergeSummary({ inserted: data.length, updated: 0, skipped: 0, invalid: 0 });
+      await finishSuccess();
+      return;
+    }
+
+    const uploadId = existingUpload.id;
+    const { error: metaErr } = await supabase
+      .from("csv_uploads")
+      .update({ file_name: name, upload_mode: "merge" })
+      .eq("id", uploadId);
+    if (metaErr) {
+      setParseErrors((prev) => [...prev, { row: -1, message: `Save error: ${metaErr.message}` }]);
+      setStatus("error");
+      return;
+    }
+
+    const existingRates: { id: string; country: string; network: string; prefix: string; rate_type: string }[] = [];
+    let from = 0;
+    const fetchPage = 5000;
+    while (true) {
+      const { data: page, error: pgErr } = await supabase
+        .from("phone_rates")
+        .select("id, country, network, prefix, rate_type")
+        .eq("upload_id", uploadId)
+        .range(from, from + fetchPage - 1);
+      if (pgErr) {
+        setParseErrors((prev) => [...prev, { row: -1, message: pgErr.message }]);
+        setStatus("error");
+        return;
+      }
+      if (!page?.length) break;
+      existingRates.push(...(page as typeof existingRates));
+      if (page.length < fetchPage) break;
+      from += fetchPage;
+    }
+
+    const keyToId = new Map<string, string>();
+    for (const r of existingRates) {
+      keyToId.set(rateRowKey(r.country, r.network, r.prefix, r.rate_type), r.id);
+    }
+
+    const toInsert: Record<string, unknown>[] = [];
+    const toUpdate: { id: string; patch: Record<string, unknown> }[] = [];
+    let skipped = 0;
+    let invalid = 0;
+    const invalidCommentRows: PhoneRate[] = [];
+
+    for (const row of data) {
+      const country = resolveCountry(row.prefix, row.country);
+      const rate_type = row.rate_type ?? "International";
+      const norm = normalizeUploadComment(row.comment);
+      const key = rateRowKey(country, row.network, row.prefix, rate_type);
+
+      if (norm === null) {
+        invalid++;
+        invalidCommentRows.push({ ...row, country, rate_type });
+        continue;
+      }
+      if (norm === "empty" || norm === "NO_CHANGES") {
+        skipped++;
+        continue;
+      }
+
+      if (norm === "NEW_BRAND") {
+        toInsert.push({
+          upload_id: uploadId,
+          country,
+          network: row.network,
+          prefix: row.prefix,
+          rate: row.rate,
+          rate_type,
+          comment: UPLOAD_COMMENT.NEW_BRAND,
+        });
+        continue;
+      }
+
+      if (norm === "INCREMENT" || norm === "DECREMENT") {
+        const id = keyToId.get(key);
+        if (!id) {
+          skipped++;
+          continue;
+        }
+        toUpdate.push({
+          id,
+          patch: {
+            country,
+            network: row.network,
+            prefix: row.prefix,
+            rate: row.rate,
+            rate_type,
+            comment: UPLOAD_COMMENT[norm],
           },
-    );
-    setStatus("success");
-    if (distinctMissingPrefixes.size > 0) {
+        });
+      }
+    }
+
+    let done = 0;
+    const totalWork = toInsert.length + toUpdate.length;
+
+    for (let i = 0; i < toInsert.length; i += BATCH) {
+      const chunk = toInsert.slice(i, i + BATCH);
+      const { error } = await supabase.from("phone_rates").upsert(chunk, {
+        onConflict: "upload_id,country,network,prefix,rate_type",
+        ignoreDuplicates: false,
+      });
+      if (error) {
+        setParseErrors((prev) => [...prev, { row: -1, message: `Save error: ${error.message}` }]);
+        setStatus("error");
+        return;
+      }
+      done += chunk.length;
+      setUploadedCount(done);
+    }
+
+    for (let i = 0; i < toUpdate.length; i += BATCH) {
+      const chunk = toUpdate.slice(i, i + BATCH);
+      const results = await Promise.all(
+        chunk.map((u) => supabase.from("phone_rates").update(u.patch).eq("id", u.id)),
+      );
+      const failed = results.find((r) => r.error);
+      if (failed?.error) {
+        setParseErrors((prev) => [...prev, { row: -1, message: `Save error: ${failed.error.message}` }]);
+        setStatus("error");
+        return;
+      }
+      done += chunk.length;
+      setUploadedCount(done);
+    }
+
+    setMergeSummary({
+      inserted: toInsert.length,
+      updated: toUpdate.length,
+      skipped,
+      invalid,
+    });
+    setMergeInvalidRows(invalidCommentRows);
+    if (invalid > 0) {
       toast.warning(
-        `${distinctMissingPrefixes.size} prefix${distinctMissingPrefixes.size === 1 ? "" : "es"} not in Master List (${rowsWithMissingPrefix} row${rowsWithMissingPrefix === 1 ? "" : "s"}). You can download a report below.`,
-        { duration: 12000 },
+        `${invalid} row${invalid === 1 ? "" : "s"} had an invalid comment (use: No changes, Increment, Decrement, New brand).`,
+        { duration: 8000 },
       );
     }
-    onSuccess?.();
+    if (totalWork === 0) {
+      toast.info("No rows to apply (all lines were No changes or empty comment).");
+    }
+    setUploadedCount(totalWork);
+    await finishSuccess();
   };
 
   const handleFile = async (file: File) => {
@@ -533,21 +884,63 @@ export default function CsvUploader({ vendorId, vendorName: vendorNameProp, onSu
     <>
       {/* Confirmation Dialog */}
       <AlertDialog open={status === "confirming"}>
-        <AlertDialogContent>
+        <AlertDialogContent className="max-w-lg">
           <AlertDialogHeader>
             <AlertDialogTitle>Confirm upload</AlertDialogTitle>
-            <AlertDialogDescription>
-            You are about to import <strong>{parsedData.length} records</strong> from{" "}
-            <span className="font-mono">{fileName}</span> for the selected vendor.
-            {selectedVendorId
-              ? " Any existing CSV/XLSX for this vendor will be replaced."
-              : " They will appear in the comparison view."}{" "}
-            Do you want to continue?
+            <AlertDialogDescription asChild>
+              <div className="space-y-4 text-sm text-muted-foreground">
+                <p>
+                  You are about to import <strong className="text-foreground">{parsedData.length} records</strong> from{" "}
+                  <span className="font-mono">{fileName}</span>
+                  {selectedVendorId ? " for the selected vendor." : "."}
+                </p>
+                <div className="space-y-2 rounded-lg border border-border bg-muted/30 p-3 text-left">
+                  <Label className="text-foreground text-xs font-semibold uppercase tracking-wide">
+                    Import mode
+                  </Label>
+                  <RadioGroup
+                    value={uploadMode}
+                    onValueChange={(v) => setUploadMode(v === "merge" ? "merge" : "replace")}
+                    className="gap-3"
+                  >
+                    <div className="flex items-start gap-2">
+                      <RadioGroupItem value="replace" id="um-replace" className="mt-0.5" />
+                      <label htmlFor="um-replace" className="cursor-pointer leading-snug">
+                        <span className="font-medium text-foreground">Replace entire file</span>
+                        <span className="block text-xs text-muted-foreground mt-0.5">
+                          Remove this vendor&apos;s current upload and insert every row from the file. Optional{" "}
+                          <code className="text-[11px]">comment</code> column is stored as-is.
+                        </span>
+                      </label>
+                    </div>
+                    <div className="flex items-start gap-2">
+                      <RadioGroupItem
+                        value="merge"
+                        id="um-merge"
+                        className="mt-0.5"
+                        disabled={!selectedVendorId}
+                      />
+                      <label
+                        htmlFor="um-merge"
+                        className={`leading-snug ${!selectedVendorId ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}`}
+                      >
+                        <span className="font-medium text-foreground">Field update (merge)</span>
+                        <span className="block text-xs text-muted-foreground mt-0.5">
+                          Requires a vendor. Add a <code className="text-[11px]">comment</code> column with:{" "}
+                          <em>No changes</em>, <em>Increment</em>, <em>Decrement</em>, or <em>New brand</em>.{" "}
+                          No changes = skip; New brand = add prefix; Increment/Decrement = update matching row.
+                        </span>
+                      </label>
+                    </div>
+                  </RadioGroup>
+                </div>
+                <p className="text-xs">Continue?</p>
+              </div>
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel onClick={resetState}>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={() => doUpload(parsedData, fileName ?? "import.csv")}>
+            <AlertDialogAction onClick={() => doUpload(parsedData, fileName ?? "import.csv", uploadMode)}>
               Yes, import
             </AlertDialogAction>
           </AlertDialogFooter>
@@ -619,7 +1012,7 @@ export default function CsvUploader({ vendorId, vendorName: vendorNameProp, onSu
                   </p>
                 </div>
                 <div className="flex gap-2 flex-wrap justify-center text-xs text-muted-foreground">
-                  {["country", "network", "prefix", "rate"].map((col) => (
+                  {["country", "network", "prefix", "rate", "comment"].map((col) => (
                     <span key={col} className="bg-muted px-2 py-1 rounded-full font-mono">
                       {col}
                     </span>
@@ -668,9 +1061,55 @@ export default function CsvUploader({ vendorId, vendorName: vendorNameProp, onSu
                 </div>
                 <div className="w-full max-w-md space-y-3">
                   <p className="text-lg font-semibold text-success">
-                    {uploadedCount} records saved!
+                    {mergeSummary
+                      ? mergeSummary.inserted + mergeSummary.updated > 0
+                        ? `${mergeSummary.inserted + mergeSummary.updated} rows applied`
+                        : "No changes applied"
+                      : `${uploadedCount} records saved!`}
                   </p>
+                  {mergeSummary ? (
+                    <p className="text-xs text-muted-foreground text-left">
+                      {mergeSummary.inserted} added, {mergeSummary.updated} updated, {mergeSummary.skipped} skipped
+                      {mergeSummary.invalid > 0 ? `, ${mergeSummary.invalid} invalid comment` : ""}.
+                    </p>
+                  ) : null}
+                  {mergeInvalidRows.length > 0 ? (
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      className="w-full h-auto min-h-8 flex-col gap-1 py-2"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        downloadInvalidCommentRowsXlsx(mergeInvalidRows, fileName);
+                      }}
+                    >
+                      <span className="flex items-center gap-2">
+                        <FileDown className="w-4 h-4 shrink-0" />
+                        Download invalid comment rows (XLSX)
+                      </span>
+                      {fileName ? (
+                        <span className="w-full break-all text-center font-mono text-[11px] font-normal leading-tight text-muted-foreground">
+                          {buildInvalidCommentFilename(
+                            fileName.replace(/\.[^.]+$/i, ""),
+                            formatExportDateSlug(),
+                          )}
+                        </span>
+                      ) : null}
+                    </Button>
+                  ) : null}
                   <p className="text-sm text-muted-foreground">{fileName}</p>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      resetState();
+                    }}
+                    className="flex items-center justify-center gap-1.5 w-full text-xs text-muted-foreground hover:text-destructive transition-colors pt-1"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    Upload another file
+                  </button>
                   {missingMasterReport && missingMasterReport.distinctPrefixCount > 0 ? (
                     <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2.5 text-left text-sm text-foreground space-y-2">
                       <p>
@@ -743,100 +1182,36 @@ export default function CsvUploader({ vendorId, vendorName: vendorNameProp, onSu
 
         {/* Errors */}
         {parseErrors.length > 0 && (
-          <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-4 space-y-2">
+          <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-4 space-y-3">
             <p className="text-sm font-semibold text-destructive flex items-center gap-2">
               <AlertCircle className="w-4 h-4" />
-              {parseErrors.length} warning{parseErrors.length > 1 ? "s" : ""}
+              {parseErrors.length} error{parseErrors.length > 1 ? "s" : ""}
             </p>
             <ul className="space-y-1">
-              {parseErrors.slice(0, 5).map((err, i) => (
+              {parseErrors.slice(0, 8).map((err, i) => (
                 <li key={i} className="text-xs text-destructive/80 font-mono pl-2 border-l-2 border-destructive/30">
                   {err.message}
                 </li>
               ))}
-              {parseErrors.length > 5 && (
+              {parseErrors.length > 8 && (
                 <li className="text-xs text-muted-foreground pl-2">
-                  …and {parseErrors.length - 5} more
+                  …and {parseErrors.length - 8} more
                 </li>
               )}
             </ul>
-          </div>
-        )}
-
-        {/* Preview table */}
-        {parsedData.length > 0 && status !== "idle" && (
-          <div className="rounded-xl border border-border overflow-hidden">
-            <div className="bg-muted px-4 py-2.5 flex items-center justify-between">
-              <p className="text-sm font-semibold text-foreground">
-                Preview — {parsedData.length} rows
-              </p>
-              {status === "success" && (
-                <button
-                  onClick={resetState}
-                  className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-destructive transition-colors"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                  Upload another file
-                </button>
-              )}
-            </div>
-            <div className="overflow-x-auto max-h-60">
-              <table className="w-full text-sm">
-                <thead>
-                    <tr className="border-b border-border bg-card">
-                    <SortableNativeTh
-                      sortKey="country"
-                      sort={previewSort}
-                      onSort={(k) => setPreviewSort((s) => cycleSort(s, k as "country" | "network" | "prefix" | "rate"))}
-                      className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide"
-                    >
-                      Country
-                    </SortableNativeTh>
-                    <SortableNativeTh
-                      sortKey="network"
-                      sort={previewSort}
-                      onSort={(k) => setPreviewSort((s) => cycleSort(s, k as "country" | "network" | "prefix" | "rate"))}
-                      className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide"
-                    >
-                      Network
-                    </SortableNativeTh>
-                    <SortableNativeTh
-                      sortKey="prefix"
-                      sort={previewSort}
-                      onSort={(k) => setPreviewSort((s) => cycleSort(s, k as "country" | "network" | "prefix" | "rate"))}
-                      className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide"
-                    >
-                      Prefix
-                    </SortableNativeTh>
-                    <SortableNativeTh
-                      sortKey="rate"
-                      sort={previewSort}
-                      onSort={(k) => setPreviewSort((s) => cycleSort(s, k as "country" | "network" | "prefix" | "rate"))}
-                      className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide"
-                    >
-                      Rate
-                    </SortableNativeTh>
-                  </tr>
-                </thead>
-                <tbody>
-                  {sortedPreviewRows.slice(0, 50).map((row, i) => (
-                    <tr key={i} className="border-b border-border last:border-0 hover:bg-muted/40 transition-colors">
-                      <td className="px-4 py-2.5 text-foreground">{row.country}</td>
-                      <td className="px-4 py-2.5 text-foreground">{row.network}</td>
-                      <td className="px-4 py-2.5 font-mono text-primary">{row.prefix}</td>
-                      <td className="px-4 py-2.5 text-foreground">{formatRate(row.rate)}</td>
-                    </tr>
-                  ))}
-                  {parsedData.length > 50 && (
-                    <tr>
-                      <td colSpan={4} className="px-4 py-2 text-center text-xs text-muted-foreground">
-                        …showing 50 of {parsedData.length} rows
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              className="w-full sm:w-auto"
+              onClick={(e) => {
+                e.stopPropagation();
+                downloadParseErrorsXlsx(parseErrors, fileName);
+              }}
+            >
+              <FileDown className="w-4 h-4 mr-2" />
+              Download error rows (XLSX)
+            </Button>
           </div>
         )}
       </div>
