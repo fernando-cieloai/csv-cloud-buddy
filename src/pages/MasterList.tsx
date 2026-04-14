@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -8,7 +8,6 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import {
   Table,
   TableBody,
@@ -18,7 +17,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { SortableTableHead } from "@/components/ui/sortable-table-head";
-import { cycleSort, compareText, compareNumber, type SortState } from "@/lib/tableSort";
+import { cycleSort, type SortState } from "@/lib/tableSort";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -26,7 +25,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { supabase } from "@/integrations/supabase/client";
-import { RefreshCw, Plus, Upload, MoreVertical, ChevronLeft, ChevronRight, Eye, Pencil, Trash2 } from "lucide-react";
+import { RefreshCw, Plus, Upload, MoreVertical, ChevronLeft, ChevronRight, Eye, Trash2 } from "lucide-react";
 import CountriesFileUploader from "@/components/CountriesFileUploader";
 
 type MasterListRow = {
@@ -41,115 +40,181 @@ type MasterListRow = {
 
 const PAGE_SIZE = 20;
 
-/** PostgREST/Supabase returns at most this many rows per request unless paginated. */
-const FETCH_CHUNK = 1000;
-
 const formatDate = (d: string | null) => (d ? new Date(d).toLocaleDateString() : "—");
+
+/** Avoid breaking PostgREST `.or()` (commas/parens are reserved). */
+function sanitizeSearchTerm(raw: string): string {
+  return raw.trim().slice(0, 200).replace(/[,()]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function isMissingMasterListViewError(err: { message?: string; code?: string } | null): boolean {
+  const m = (err?.message ?? "").toLowerCase();
+  return m.includes("master_list_flat") || m.includes("does not exist") || m.includes("schema cache") || err?.code === "42P01";
+}
+
+type MasterSortKeyInner = "country_name" | "region" | "region_code" | "effective_date" | "valid_to" | "date_added";
+
+function applyMasterListSort<T extends { order: (...args: unknown[]) => T }>(
+  query: T,
+  rowSort: SortState<MasterSortKeyInner> | null,
+  countrySortMode: "column" | "fallback_region",
+): T {
+  if (!rowSort) {
+    return query.order("region", { ascending: true }).order("region_code", { ascending: true }) as T;
+  }
+  const { key, dir } = rowSort;
+  const asc = dir === "asc";
+  if (key === "country_name") {
+    if (countrySortMode === "column") {
+      return query
+        .order("country_name", { ascending: asc, nullsFirst: true })
+        .order("region", { ascending: true })
+        .order("region_code", { ascending: true }) as T;
+    }
+    return query.order("region", { ascending: true }).order("region_code", { ascending: true }) as T;
+  }
+  if (key === "region") {
+    return query.order("region", { ascending: asc }).order("region_code", { ascending: true }) as T;
+  }
+  if (key === "region_code") {
+    return query.order("region_code", { ascending: asc }).order("region", { ascending: true }) as T;
+  }
+  if (key === "effective_date" || key === "valid_to" || key === "date_added") {
+    return query.order(key, { ascending: asc, nullsFirst: false }).order("region", { ascending: true }) as T;
+  }
+  return query as T;
+}
 
 const MasterList = () => {
   const [rows, setRows] = useState<MasterListRow[]>([]);
+  const [totalCount, setTotalCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [listRefreshNonce, setListRefreshNonce] = useState(0);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [isImportDialogOpen, setIsImportDialogOpen] = useState(false);
   const [selectedRow, setSelectedRow] = useState<MasterListRow | null>(null);
-  type MasterSortKey = "country_name" | "region" | "region_code" | "effective_date" | "valid_to" | "date_added";
-  const [rowSort, setRowSort] = useState<SortState<MasterSortKey>>(null);
-
-  const fetchData = async () => {
-    setLoading(true);
-    const accumulated: {
-      id: string;
-      region: string;
-      region_code: string;
-      effective_date: string | null;
-      valid_to: string | null;
-      date_added: string | null;
-      countries: { nombre: string } | null;
-    }[] = [];
-
-    let from = 0;
-    let fetchError: Error | null = null;
-
-    while (true) {
-      const { data, error } = await supabase
-        .from("country_regions")
-        .select("id, region, region_code, effective_date, valid_to, date_added, countries(nombre)")
-        .order("region")
-        .order("region_code")
-        .range(from, from + FETCH_CHUNK - 1);
-
-      if (error) {
-        fetchError = new Error(error.message);
-        break;
-      }
-      const batch = data ?? [];
-      accumulated.push(...batch);
-      if (batch.length < FETCH_CHUNK) break;
-      from += FETCH_CHUNK;
-    }
-
-    if (fetchError) {
-      setRows([]);
-    } else {
-      setRows(
-        accumulated.map((r) => ({
-          id: r.id,
-          country_name: (r.countries as { nombre: string } | null)?.nombre ?? "",
-          region: r.region,
-          region_code: r.region_code,
-          effective_date: r.effective_date,
-          valid_to: r.valid_to,
-          date_added: r.date_added,
-        }))
-      );
-    }
-    setLoading(false);
-  };
+  const [rowSort, setRowSort] = useState<SortState<MasterSortKeyInner>>(null);
+  const fetchSeq = useRef(0);
 
   useEffect(() => {
-    fetchData();
-  }, []);
+    const t = window.setTimeout(() => setDebouncedSearch(search.trim()), 350);
+    return () => window.clearTimeout(t);
+  }, [search]);
 
-  const filteredRows = useMemo(() => {
-    if (!search.trim()) return rows;
-    const q = search.toLowerCase().trim();
-    return rows.filter(
-      (r) =>
-        r.country_name.toLowerCase().includes(q) ||
-        r.region.toLowerCase().includes(q) ||
-        r.region_code.toLowerCase().includes(q)
-    );
-  }, [rows, search]);
+  useEffect(() => {
+    setPage(1);
+  }, [debouncedSearch]);
 
   useEffect(() => {
     setPage(1);
   }, [rowSort]);
 
-  const sortedFilteredRows = useMemo(() => {
-    if (!rowSort) return filteredRows;
-    const { key, dir } = rowSort;
-    const m = dir === "asc" ? 1 : -1;
-    return [...filteredRows].sort((a, b) => {
-      if (key === "effective_date" || key === "valid_to" || key === "date_added") {
-        const ta = a[key] ? new Date(a[key]!).getTime() : null;
-        const tb = b[key] ? new Date(b[key]!).getTime() : null;
-        return compareNumber(ta, tb) * m;
-      }
-      const ta = String(a[key] ?? "");
-      const tb = String(b[key] ?? "");
-      return compareText(ta, tb) * m;
-    });
-  }, [filteredRows, rowSort]);
+  useEffect(() => {
+    const seq = ++fetchSeq.current;
 
-  const totalPages = Math.max(1, Math.ceil(sortedFilteredRows.length / PAGE_SIZE));
-  const paginatedRows = sortedFilteredRows.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+    (async () => {
+      setLoading(true);
+      setLoadError(null);
+      const term = sanitizeSearchTerm(debouncedSearch);
+      const from = (page - 1) * PAGE_SIZE;
+      const to = from + PAGE_SIZE - 1;
+
+      try {
+        let query = supabase
+          .from("master_list_flat")
+          .select("id, region, region_code, effective_date, valid_to, date_added, country_name", {
+            count: "exact",
+          });
+
+        if (term) {
+          const p = `%${term}%`;
+          query = query.or(`region.ilike.${p},region_code.ilike.${p},country_name.ilike.${p}`);
+        }
+
+        query = applyMasterListSort(query, rowSort, "column");
+
+        let { data, error, count } = await query.range(from, to);
+
+        if (error && isMissingMasterListViewError(error)) {
+          let legacy = supabase
+            .from("country_regions")
+            .select("id, region, region_code, effective_date, valid_to, date_added, countries(nombre)", {
+              count: "exact",
+            });
+
+          if (term) {
+            const p = `%${term}%`;
+            let countryIds: string[] = [];
+            const { data: countries } = await supabase
+              .from("countries")
+              .select("id")
+              .ilike("nombre", `%${term}%`)
+              .limit(200);
+            countryIds = (countries ?? []).map((c) => c.id);
+            const parts = [`region.ilike.${p}`, `region_code.ilike.${p}`];
+            if (countryIds.length > 0) {
+              parts.push(`country_id.in.(${countryIds.join(",")})`);
+            }
+            legacy = legacy.or(parts.join(","));
+          }
+
+          legacy = applyMasterListSort(legacy, rowSort, "fallback_region");
+          const res2 = await legacy.range(from, to);
+          data = res2.data;
+          error = res2.error;
+          count = res2.count;
+          if (!error) {
+            data = (data ?? []).map((r) => ({
+              ...r,
+              country_name: (r.countries as { nombre: string } | null)?.nombre ?? null,
+            }));
+          }
+        }
+
+        if (seq !== fetchSeq.current) return;
+
+        if (error) {
+          console.error(error);
+          setLoadError(error.message);
+          setRows([]);
+          setTotalCount(0);
+        } else {
+          setTotalCount(count ?? 0);
+          setRows(
+            (data ?? []).map((r) => ({
+              id: r.id,
+              country_name: (r as { country_name?: string | null }).country_name ?? "",
+              region: r.region,
+              region_code: r.region_code,
+              effective_date: r.effective_date,
+              valid_to: r.valid_to,
+              date_added: r.date_added,
+            }))
+          );
+        }
+      } catch (e) {
+        if (seq === fetchSeq.current) {
+          console.error(e);
+          setLoadError(e instanceof Error ? e.message : "Failed to load master list.");
+          setRows([]);
+          setTotalCount(0);
+        }
+      } finally {
+        if (seq === fetchSeq.current) setLoading(false);
+      }
+    })();
+  }, [page, debouncedSearch, rowSort, listRefreshNonce]);
+
+  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
 
   const handleDelete = async (row: MasterListRow) => {
     if (!window.confirm(`Delete "${row.region}" (${row.region_code})?`)) return;
     const { error } = await supabase.from("country_regions").delete().eq("id", row.id);
     if (error) alert(`Error: ${error.message}`);
-    else setRows((prev) => prev.filter((r) => r.id !== row.id));
+    else setListRefreshNonce((n) => n + 1);
   };
 
   const openView = (row: MasterListRow) => setSelectedRow(row);
@@ -183,11 +248,15 @@ const MasterList = () => {
                 </DialogTitle>
               </DialogHeader>
               <p className="text-sm text-muted-foreground">
-                Upload a CSV or XLSX with columns: Country, Region, RegionCode. Optional: EffectiveDate, ValidTo, DateAdded.
+                CSV or XLSX: either <span className="font-mono">Country, Region, RegionCode</span> or two columns{" "}
+                <span className="font-mono">Region, Prefix</span> (no Country column). Labels like{" "}
+                <span className="font-mono">NAME-CELLULAR</span> map to country <span className="font-mono">NAME</span>.
+                Optional: EffectiveDate, ValidTo, DateAdded.
               </p>
               <CountriesFileUploader
                 onSuccess={() => {
-                  fetchData();
+                  setPage(1);
+                  setListRefreshNonce((n) => n + 1);
                   setIsImportDialogOpen(false);
                 }}
                 compact
@@ -196,13 +265,26 @@ const MasterList = () => {
           </Dialog>
         </div>
 
+        {loadError && (
+          <div className="mx-6 mt-4 mb-2 rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+            <strong className="font-semibold">Could not load Master List.</strong>{" "}
+            <span className="opacity-90">{loadError}</span>
+            {(loadError.toLowerCase().includes("master_list_flat") || loadError.includes("does not exist")) && (
+              <span className="block mt-2 text-xs opacity-80">
+                Apply pending Supabase migrations so the view <code className="font-mono">master_list_flat</code> exists
+                (e.g. <code className="font-mono">supabase db push</code>).
+              </span>
+            )}
+          </div>
+        )}
+
         <Table>
           <TableHeader>
             <TableRow className="border-b border-border hover:bg-transparent">
               <SortableTableHead
                 sortKey="country_name"
                 sort={rowSort}
-                onSort={(k) => setRowSort((s) => cycleSort(s, k as MasterSortKey))}
+                onSort={(k) => setRowSort((s) => cycleSort(s, k as MasterSortKeyInner))}
                 className="h-11 px-6 font-medium text-muted-foreground bg-muted/50"
               >
                 Country
@@ -210,7 +292,7 @@ const MasterList = () => {
               <SortableTableHead
                 sortKey="region"
                 sort={rowSort}
-                onSort={(k) => setRowSort((s) => cycleSort(s, k as MasterSortKey))}
+                onSort={(k) => setRowSort((s) => cycleSort(s, k as MasterSortKeyInner))}
                 className="h-11 px-6 font-medium text-muted-foreground bg-muted/50"
               >
                 Region
@@ -218,7 +300,7 @@ const MasterList = () => {
               <SortableTableHead
                 sortKey="region_code"
                 sort={rowSort}
-                onSort={(k) => setRowSort((s) => cycleSort(s, k as MasterSortKey))}
+                onSort={(k) => setRowSort((s) => cycleSort(s, k as MasterSortKeyInner))}
                 className="h-11 px-6 font-medium text-muted-foreground bg-muted/50"
               >
                 RegionCode
@@ -226,7 +308,7 @@ const MasterList = () => {
               <SortableTableHead
                 sortKey="effective_date"
                 sort={rowSort}
-                onSort={(k) => setRowSort((s) => cycleSort(s, k as MasterSortKey))}
+                onSort={(k) => setRowSort((s) => cycleSort(s, k as MasterSortKeyInner))}
                 className="h-11 px-6 font-medium text-muted-foreground bg-muted/50"
               >
                 EffectiveDate
@@ -234,7 +316,7 @@ const MasterList = () => {
               <SortableTableHead
                 sortKey="valid_to"
                 sort={rowSort}
-                onSort={(k) => setRowSort((s) => cycleSort(s, k as MasterSortKey))}
+                onSort={(k) => setRowSort((s) => cycleSort(s, k as MasterSortKeyInner))}
                 className="h-11 px-6 font-medium text-muted-foreground bg-muted/50"
               >
                 ValidTo
@@ -242,7 +324,7 @@ const MasterList = () => {
               <SortableTableHead
                 sortKey="date_added"
                 sort={rowSort}
-                onSort={(k) => setRowSort((s) => cycleSort(s, k as MasterSortKey))}
+                onSort={(k) => setRowSort((s) => cycleSort(s, k as MasterSortKeyInner))}
                 className="h-11 px-6 font-medium text-muted-foreground bg-muted/50"
               >
                 DateAdded
@@ -258,14 +340,22 @@ const MasterList = () => {
                   Loading…
                 </TableCell>
               </TableRow>
-            ) : sortedFilteredRows.length === 0 ? (
+            ) : !loadError && totalCount === 0 ? (
               <TableRow className="border-b border-border hover:bg-transparent">
                 <TableCell colSpan={7} className="text-center py-12 text-muted-foreground px-6">
-                  No records yet. Use the + button to import a file.
+                  {debouncedSearch
+                    ? "No matching records. Try a different search."
+                    : "No records yet. Use the + button to import a file."}
+                </TableCell>
+              </TableRow>
+            ) : loadError ? (
+              <TableRow className="border-b border-border hover:bg-transparent">
+                <TableCell colSpan={7} className="text-center py-12 text-muted-foreground px-6">
+                  Fix the error above, then refresh the page.
                 </TableCell>
               </TableRow>
             ) : (
-              paginatedRows.map((row) => (
+              rows.map((row) => (
                 <TableRow key={row.id} className="border-b border-border">
                   <TableCell className="font-medium px-6 py-4">{row.country_name}</TableCell>
                   <TableCell className="px-6 py-4">{row.region}</TableCell>
@@ -298,10 +388,10 @@ const MasterList = () => {
           </TableBody>
         </Table>
 
-        {sortedFilteredRows.length > 0 && (
+        {totalCount > 0 && (
           <div className="flex items-center justify-between gap-4 px-6 py-3 border-t border-border bg-muted/30 text-sm text-muted-foreground">
             <span>
-              {Math.min(page * PAGE_SIZE, sortedFilteredRows.length) - (page - 1) * PAGE_SIZE} of {sortedFilteredRows.length} items
+              Showing {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, totalCount)} of {totalCount}
             </span>
             <div className="flex items-center gap-2">
               <span className="min-w-[4rem] text-center">

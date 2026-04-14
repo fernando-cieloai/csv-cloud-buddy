@@ -252,7 +252,18 @@ export type Database = {
       }
     }
     Views: {
-      [_ in never]: never
+      master_list_flat: {
+        Row: {
+          id: string
+          region: string
+          region_code: string
+          effective_date: string | null
+          valid_to: string | null
+          date_added: string | null
+          country_name: string | null
+        }
+        Relationships: []
+      }
     }
     Functions: {
       [_ in never]: never

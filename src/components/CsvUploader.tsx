@@ -23,7 +23,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
-import { roundUpTo3Decimals } from "@/lib/utils";
+import { cn, roundUpTo3Decimals } from "@/lib/utils";
+import { canonicalPrefixForMasterMatch, normalizePrefixRaw } from "@/lib/quotationPrefixCanonical";
 import { compareText } from "@/lib/tableSort";
 
 /** Canonical values for the optional CSV/XLSX `comment` column (merge mode). */
@@ -103,7 +104,8 @@ function parseCSV(text: string): { data: PhoneRate[]; errors: ParseError[] } {
 
     const country = colMap["country"] >= 0 ? cols[colMap["country"]] : cols[0];
     const network = colMap["phone company"] >= 0 ? cols[colMap["phone company"]] : cols[1];
-    const prefix = colMap["prefix"] >= 0 ? cols[colMap["prefix"]] : cols[2];
+    const prefixRaw = colMap["prefix"] >= 0 ? cols[colMap["prefix"]] : cols[2];
+    const prefix = normalizePrefixRaw(String(prefixRaw ?? ""));
     const rateRaw = colMap["price"] >= 0 ? cols[colMap["price"]] : cols[3];
 
     const commentRawEarly = colMap["comment"] >= 0 ? cols[colMap["comment"]] : undefined;
@@ -162,11 +164,6 @@ const COL_PAIRS: [string, string[]][] = [
   ["price", ["price", "rate"]],
   ["comment", ["comment", "change", "change type", "status"]],
 ];
-
-/** Same normalization as master list `region_code` lookup in `doUpload`. */
-function normalizeVendorPrefixForMaster(prefix: string): string {
-  return String(prefix ?? "").trim().replace(/^\+/, "");
-}
 
 function buildColMap(header: string[]): Record<string, number> {
   const lower = header.map((h) => String(h).toLowerCase().trim().replace(/"/g, ""));
@@ -228,7 +225,8 @@ function parseSheetRows(
     const cols = row.map((c) => String(c ?? "").trim());
     const country = colMap["country"] >= 0 ? cols[colMap["country"]] : cols[0];
     const network = colMap["phone company"] >= 0 ? cols[colMap["phone company"]] : cols[1];
-    const prefix = colMap["prefix"] >= 0 ? cols[colMap["prefix"]] : cols[2];
+    const prefixRaw = colMap["prefix"] >= 0 ? cols[colMap["prefix"]] : cols[2];
+    const prefix = normalizePrefixRaw(String(prefixRaw ?? ""));
     const rateRaw = colMap["price"] >= 0 ? cols[colMap["price"]] : cols[3];
     if (!country || !network || !prefix || rateRaw === undefined || rateRaw === "") continue;
     const rate = parseFloat(rateRaw);
@@ -305,6 +303,8 @@ interface MissingMasterPrefixRow {
   network: string;
   prefix: string;
 }
+
+type UploadResultTab = "upload" | "errors" | "missing_prefixes";
 
 interface CsvUploaderProps {
   /** When set, file is uploaded for this vendor; vendor selector is hidden */
@@ -412,6 +412,22 @@ export default function CsvUploader({ vendorId, vendorName: vendorNameProp, onSu
     rows: MissingMasterPrefixRow[];
     exportDateSlug: string;
   } | null>(null);
+  const [resultTab, setResultTab] = useState<UploadResultTab>("upload");
+
+  const showErrorsTab = parseErrors.length > 0;
+  const showMissingPrefixesTab =
+    status === "success" &&
+    missingMasterReport != null &&
+    missingMasterReport.distinctPrefixCount > 0;
+  const showResultTabs = showErrorsTab || showMissingPrefixesTab;
+
+  useEffect(() => {
+    if (!showErrorsTab && resultTab === "errors") setResultTab("upload");
+  }, [showErrorsTab, resultTab]);
+
+  useEffect(() => {
+    if (!showMissingPrefixesTab && resultTab === "missing_prefixes") setResultTab("upload");
+  }, [showMissingPrefixesTab, resultTab]);
 
   useEffect(() => {
     if (vendorId) setSelectedVendorId(vendorId);
@@ -469,6 +485,7 @@ export default function CsvUploader({ vendorId, vendorName: vendorNameProp, onSu
     setUploadMode("replace");
     setMergeSummary(null);
     setMergeInvalidRows([]);
+    setResultTab("upload");
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
@@ -510,33 +527,120 @@ export default function CsvUploader({ vendorId, vendorName: vendorNameProp, onSu
     }
 
     const prefixToCountry = new Map<string, string>();
-    let offset = 0;
-    const pageSize = 5000;
-    while (true) {
-      const { data: crData } = await supabase
-        .from("country_regions")
-        .select("region_code, countries(nombre)")
-        .range(offset, offset + pageSize - 1);
-      if (!crData?.length) break;
-      for (const r of crData) {
-        const code = normalizeVendorPrefixForMaster(String((r as { region_code: string }).region_code ?? ""));
-        const country = (r as { countries: { nombre: string } | null }).countries?.nombre;
-        if (code && country) prefixToCountry.set(code, country);
+    const masterCanonicalKeys = new Set<string>();
+
+    const addMasterMatch = (regionCode: unknown, countryName?: string | null) => {
+      const key = canonicalPrefixForMasterMatch(String(regionCode ?? ""));
+      if (!key) return;
+      masterCanonicalKeys.add(key);
+      const cn = countryName?.trim();
+      if (cn) prefixToCountry.set(key, cn);
+    };
+
+    type RpcCanonRow = { region_code: string; country_name: string };
+
+    const vendorCanonList = [
+      ...new Set(
+        data
+          .map((row) => canonicalPrefixForMasterMatch(row.prefix))
+          .filter((c): c is string => Boolean(c)),
+      ),
+    ];
+
+    const vendorRawPrefixList = [
+      ...new Set(
+        data
+          .map((row) => String(row.prefix ?? "").trim())
+          .filter((p) => p.length > 0),
+      ),
+    ];
+
+    /** Exact text match on country_regions.region_code (uses idx on region_code). */
+    const EXACT_REGION_CODE_CHUNK = 250;
+    if (vendorRawPrefixList.length > 0) {
+      for (let i = 0; i < vendorRawPrefixList.length; i += EXACT_REGION_CODE_CHUNK) {
+        const chunk = vendorRawPrefixList.slice(i, i + EXACT_REGION_CODE_CHUNK);
+        const { data: exactRows, error: exactErr } = await supabase
+          .from("country_regions")
+          .select("region_code, countries(nombre)")
+          .in("region_code", chunk);
+        if (exactErr) {
+          setParseErrors((prev) => [
+            ...prev,
+            { row: -1, message: `Master List prefix lookup: ${exactErr.message}` },
+          ]);
+          setStatus("error");
+          return;
+        }
+        for (const r of exactRows ?? []) {
+          const rc = (r as { region_code: string }).region_code;
+          const cn = (r as { countries: { nombre: string } | null }).countries?.nombre;
+          addMasterMatch(rc, cn);
+        }
       }
-      if (crData.length < pageSize) break;
-      offset += pageSize;
     }
 
-    const masterPrefixCodes = new Set(prefixToCountry.keys());
+    /** Canonical SQL match (011, NFKC, etc.) — additive on top of exact. */
+    const VENDOR_PREFIX_CHUNK = 2000;
+    let masterPrefixRpcOk = false;
+    if (vendorRawPrefixList.length > 0) {
+      masterPrefixRpcOk = true;
+      for (let i = 0; i < vendorRawPrefixList.length; i += VENDOR_PREFIX_CHUNK) {
+        const chunk = vendorRawPrefixList.slice(i, i + VENDOR_PREFIX_CHUNK);
+        const { data: chunkRows, error: chunkErr } = await supabase.rpc("resolve_vendor_prefixes_in_master", {
+          p_raw_prefixes: chunk,
+        });
+        if (chunkErr || !Array.isArray(chunkRows)) {
+          masterPrefixRpcOk = false;
+          break;
+        }
+        for (const row of chunkRows as RpcCanonRow[]) {
+          addMasterMatch(row.region_code, row.country_name);
+        }
+      }
+    }
+
+    // RPC failed or not deployed: paginate — do not clear (exact RPC rows already merged).
+    if (!masterPrefixRpcOk && vendorCanonList.length > 0) {
+      const vendorCanonSet = new Set(vendorCanonList);
+      const foundInMaster = new Set([...vendorCanonSet].filter((c) => masterCanonicalKeys.has(c)));
+      let offset = 0;
+      const countryRegionsPage = 5000;
+      while (foundInMaster.size < vendorCanonSet.size) {
+        const { data: crData, error: crErr } = await supabase
+          .from("country_regions")
+          .select("region_code, countries(nombre)")
+          .order("id", { ascending: true })
+          .range(offset, offset + countryRegionsPage - 1);
+        if (crErr) {
+          setParseErrors((prev) => [
+            ...prev,
+            { row: -1, message: `Could not load Master List prefixes: ${crErr.message}` },
+          ]);
+          setStatus("error");
+          return;
+        }
+        if (!crData?.length) break;
+        for (const r of crData) {
+          const canon = canonicalPrefixForMasterMatch(String((r as { region_code: string }).region_code ?? ""));
+          if (!canon || !vendorCanonSet.has(canon)) continue;
+          masterCanonicalKeys.add(canon);
+          foundInMaster.add(canon);
+          const country = (r as { countries: { nombre: string } | null }).countries?.nombre;
+          if (country) prefixToCountry.set(canon, country);
+        }
+        offset += crData.length;
+      }
+    }
 
     const missingByTriple = new Map<string, MissingMasterPrefixRow>();
     const distinctMissingPrefixes = new Set<string>();
     let rowsWithMissingPrefix = 0;
     for (const row of data) {
-      const n = normalizeVendorPrefixForMaster(row.prefix);
-      if (!n || masterPrefixCodes.has(n)) continue;
+      const canon = canonicalPrefixForMasterMatch(row.prefix);
+      if (!canon || masterCanonicalKeys.has(canon)) continue;
       rowsWithMissingPrefix++;
-      distinctMissingPrefixes.add(n);
+      distinctMissingPrefixes.add(canon);
       const key = `${row.country}\t${row.network}\t${row.prefix}`;
       if (!missingByTriple.has(key)) {
         missingByTriple.set(key, { country: row.country, network: row.network, prefix: row.prefix });
@@ -551,8 +655,8 @@ export default function CsvUploader({ vendorId, vendorName: vendorNameProp, onSu
     });
 
     const resolveCountry = (prefix: string, vendorCountry: string): string => {
-      const normalized = normalizeVendorPrefixForMaster(prefix);
-      return prefixToCountry.get(normalized) ?? vendorCountry;
+      const canon = canonicalPrefixForMasterMatch(prefix);
+      return prefixToCountry.get(canon) ?? vendorCountry;
     };
 
     const rateRowKey = (country: string, network: string, prefix: string, rateType: string) =>
@@ -604,7 +708,7 @@ export default function CsvUploader({ vendorId, vendorName: vendorNameProp, onSu
       setStatus("success");
       if (distinctMissingPrefixes.size > 0) {
         toast.warning(
-          `${distinctMissingPrefixes.size} prefix${distinctMissingPrefixes.size === 1 ? "" : "es"} not in Master List (${rowsWithMissingPrefix} row${rowsWithMissingPrefix === 1 ? "" : "s"}). You can download a report below.`,
+          `${distinctMissingPrefixes.size} prefix${distinctMissingPrefixes.size === 1 ? "" : "es"} not in Master List (${rowsWithMissingPrefix} row${rowsWithMissingPrefix === 1 ? "" : "s"}). Open the "Prefixes not in Master List" tab to download a report.`,
           { duration: 12000 },
         );
       }
@@ -700,13 +804,13 @@ export default function CsvUploader({ vendorId, vendorName: vendorNameProp, onSu
 
     const existingRates: { id: string; country: string; network: string; prefix: string; rate_type: string }[] = [];
     let from = 0;
-    const fetchPage = 5000;
+    const phoneRatesPage = 5000;
     while (true) {
       const { data: page, error: pgErr } = await supabase
         .from("phone_rates")
         .select("id, country, network, prefix, rate_type")
         .eq("upload_id", uploadId)
-        .range(from, from + fetchPage - 1);
+        .range(from, from + phoneRatesPage - 1);
       if (pgErr) {
         setParseErrors((prev) => [...prev, { row: -1, message: pgErr.message }]);
         setStatus("error");
@@ -714,8 +818,7 @@ export default function CsvUploader({ vendorId, vendorName: vendorNameProp, onSu
       }
       if (!page?.length) break;
       existingRates.push(...(page as typeof existingRates));
-      if (page.length < fetchPage) break;
-      from += fetchPage;
+      from += page.length;
     }
 
     const keyToId = new Map<string, string>();
@@ -880,6 +983,160 @@ export default function CsvUploader({ vendorId, vendorName: vendorNameProp, onSu
     if (file) handleFile(file);
   };
 
+  const renderDropZone = () => (
+    <div
+      className={`relative border-2 border-dashed rounded-2xl transition-all duration-200 cursor-pointer
+        ${isDragging ? "border-primary bg-accent scale-[1.01]" : "border-border bg-card hover:border-primary hover:bg-accent/40"}
+        ${status === "success" ? "border-success bg-success-muted" : ""}
+      `}
+      onClick={() => fileInputRef.current?.click()}
+      onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+      onDragLeave={() => setIsDragging(false)}
+      onDrop={onDrop}
+    >
+      <div className={`flex flex-col items-center gap-4 text-center ${compact ? "py-8 px-6" : "py-12 px-8"}`}>
+        {status === "idle" && (
+          <>
+            <div className="w-16 h-16 rounded-2xl bg-secondary flex items-center justify-center">
+              <Upload className="w-8 h-8 text-primary" />
+            </div>
+            <div>
+              <p className="text-lg font-semibold text-foreground">
+                Drag a CSV or XLSX file here
+              </p>
+              <p className="text-sm text-muted-foreground mt-1">
+                or click to select
+              </p>
+            </div>
+          </>
+        )}
+
+        {status === "parsing" && (
+          <>
+            <Loader2 className="w-10 h-10 text-primary animate-spin" />
+            <p className="text-base font-medium text-foreground">Parsing file…</p>
+          </>
+        )}
+
+        {status === "confirming" && (
+          <>
+            <div className="w-16 h-16 rounded-2xl bg-secondary flex items-center justify-center">
+              <FileText className="w-8 h-8 text-primary" />
+            </div>
+            <p className="text-base font-medium text-foreground">
+              {parsedData.length} records ready — confirm in the dialog
+            </p>
+          </>
+        )}
+
+        {status === "uploading" && (
+          <>
+            <Loader2 className="w-10 h-10 text-primary animate-spin" />
+            <p className="text-base font-medium text-foreground">
+              Saving records… ({uploadedCount} / {parsedData.length})
+            </p>
+            <div className="w-full max-w-xs bg-muted rounded-full h-2 overflow-hidden">
+              <div
+                className="h-full bg-primary transition-all duration-300 rounded-full"
+                style={{ width: `${parsedData.length ? (uploadedCount / parsedData.length) * 100 : 0}%` }}
+              />
+            </div>
+          </>
+        )}
+
+        {status === "success" && (
+          <>
+            <div className="w-16 h-16 rounded-2xl bg-success-muted flex items-center justify-center">
+              <CheckCircle className="w-8 h-8 text-success" />
+            </div>
+            <div className="w-full max-w-md space-y-3">
+              <p className="text-lg font-semibold text-success">
+                {mergeSummary
+                  ? mergeSummary.inserted + mergeSummary.updated > 0
+                    ? `${mergeSummary.inserted + mergeSummary.updated} rows applied`
+                    : "No changes applied"
+                  : `${uploadedCount} records saved!`}
+              </p>
+              {mergeSummary ? (
+                <p className="text-xs text-muted-foreground text-left">
+                  {mergeSummary.inserted} added, {mergeSummary.updated} updated, {mergeSummary.skipped} skipped
+                  {mergeSummary.invalid > 0 ? `, ${mergeSummary.invalid} invalid comment` : ""}.
+                </p>
+              ) : null}
+              {mergeInvalidRows.length > 0 ? (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  className="w-full h-auto min-h-8 flex-col gap-1 py-2"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    downloadInvalidCommentRowsXlsx(mergeInvalidRows, fileName);
+                  }}
+                >
+                  <span className="flex items-center gap-2">
+                    <FileDown className="w-4 h-4 shrink-0" />
+                    Download invalid comment rows (XLSX)
+                  </span>
+                  {fileName ? (
+                    <span className="w-full break-all text-center font-mono text-[11px] font-normal leading-tight text-muted-foreground">
+                      {buildInvalidCommentFilename(
+                        fileName.replace(/\.[^.]+$/i, ""),
+                        formatExportDateSlug(),
+                      )}
+                    </span>
+                  ) : null}
+                </Button>
+              ) : null}
+              <p className="text-sm text-muted-foreground">{fileName}</p>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  resetState();
+                }}
+                className="flex items-center justify-center gap-1.5 w-full text-xs text-muted-foreground hover:text-destructive transition-colors pt-1"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                Upload another file
+              </button>
+              {!showMissingPrefixesTab && missingMasterReport ? (
+                <p className="text-xs text-muted-foreground">
+                  All prefixes in this file exist in the Master List.
+                </p>
+              ) : null}
+            </div>
+          </>
+        )}
+
+        {status === "error" && parseErrors.length > 0 && parsedData.length === 0 && (
+          <>
+            <div className="w-16 h-16 rounded-2xl bg-destructive/10 flex items-center justify-center">
+              <AlertCircle className="w-8 h-8 text-destructive" />
+            </div>
+            <p className="text-base font-medium text-destructive">
+              Could not process the file
+            </p>
+          </>
+        )}
+      </div>
+
+      {fileName && status !== "idle" && (
+        <div className="absolute top-3 right-3 flex items-center gap-2 bg-muted text-muted-foreground text-xs px-3 py-1 rounded-full">
+          <FileText className="w-3 h-3" />
+          {fileName}
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); resetState(); }}
+            className="ml-1 hover:text-destructive transition-colors"
+          >
+            <X className="w-3 h-3" />
+          </button>
+        </div>
+      )}
+    </div>
+  );
+
   return (
     <>
       {/* Confirmation Dialog */}
@@ -948,6 +1205,14 @@ export default function CsvUploader({ vendorId, vendorName: vendorNameProp, onSu
       </AlertDialog>
 
       <div className={`w-full mx-auto space-y-6 ${compact ? "max-w-md" : "max-w-2xl"}`}>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".csv,.xlsx"
+          className="hidden"
+          aria-hidden
+          onChange={onFileChange}
+        />
         {/* Vendor selector - hidden when vendorId is provided */}
         {!vendorId && (
           <div className="space-y-2">
@@ -978,241 +1243,127 @@ export default function CsvUploader({ vendorId, vendorName: vendorNameProp, onSu
           </div>
         )}
 
-        {/* Drop zone */}
-        <div
-          className={`relative border-2 border-dashed rounded-2xl transition-all duration-200 cursor-pointer
-            ${isDragging ? "border-primary bg-accent scale-[1.01]" : "border-border bg-card hover:border-primary hover:bg-accent/40"}
-            ${status === "success" ? "border-success bg-success-muted" : ""}
-          `}
-          onClick={() => fileInputRef.current?.click()}
-          onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
-          onDragLeave={() => setIsDragging(false)}
-          onDrop={onDrop}
-        >
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".csv,.xlsx"
-            className="hidden"
-            onChange={onFileChange}
-          />
-
-          <div className={`flex flex-col items-center gap-4 text-center ${compact ? "py-8 px-6" : "py-12 px-8"}`}>
-            {status === "idle" && (
-              <>
-                <div className="w-16 h-16 rounded-2xl bg-secondary flex items-center justify-center">
-                  <Upload className="w-8 h-8 text-primary" />
+        {showResultTabs ? (
+          <div className="space-y-3">
+            <div
+              role="tablist"
+              aria-label="Upload results"
+              className="inline-flex h-auto min-h-10 w-full flex-wrap items-center justify-start gap-1 rounded-md bg-muted p-1 text-muted-foreground"
+            >
+              <button
+                type="button"
+                role="tab"
+                aria-selected={resultTab === "upload"}
+                className={cn(
+                  "inline-flex items-center justify-center whitespace-nowrap rounded-sm px-3 py-1.5 text-xs font-medium transition-all sm:text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+                  resultTab === "upload"
+                    ? "bg-background text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+                onClick={() => setResultTab("upload")}
+              >
+                Upload
+              </button>
+              {showErrorsTab ? (
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={resultTab === "errors"}
+                  className={cn(
+                    "inline-flex items-center justify-center whitespace-nowrap rounded-sm px-3 py-1.5 text-xs font-medium transition-all sm:text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+                    resultTab === "errors"
+                      ? "bg-background text-foreground shadow-sm"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                  onClick={() => setResultTab("errors")}
+                >
+                  Errors
+                </button>
+              ) : null}
+              {showMissingPrefixesTab ? (
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={resultTab === "missing_prefixes"}
+                  className={cn(
+                    "inline-flex items-center justify-center whitespace-nowrap rounded-sm px-3 py-1.5 text-xs font-medium transition-all sm:text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+                    resultTab === "missing_prefixes"
+                      ? "bg-background text-foreground shadow-sm"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                  onClick={() => setResultTab("missing_prefixes")}
+                >
+                  Prefixes not in Master List
+                </button>
+              ) : null}
+            </div>
+            <div className="mt-1">
+              {resultTab === "upload" ? (
+                <div role="tabpanel" aria-label="Upload">
+                  {renderDropZone()}
                 </div>
-                <div>
-                  <p className="text-lg font-semibold text-foreground">
-                    Drag a CSV or XLSX file here
+              ) : null}
+              {resultTab === "errors" && showErrorsTab ? (
+                <div role="tabpanel" aria-label="Errors" className="space-y-3">
+                  <p className="text-sm text-muted-foreground">
+                    Download an XLSX with all affected rows and full error messages ({parseErrors.length} total).
                   </p>
-                  <p className="text-sm text-muted-foreground mt-1">
-                    or click to select
-                  </p>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    className="w-full sm:w-auto"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      downloadParseErrorsXlsx(parseErrors, fileName);
+                    }}
+                  >
+                    <FileDown className="w-4 h-4 mr-2" />
+                    Download errors (XLSX)
+                  </Button>
                 </div>
-                <div className="flex gap-2 flex-wrap justify-center text-xs text-muted-foreground">
-                  {["country", "network", "prefix", "rate", "comment"].map((col) => (
-                    <span key={col} className="bg-muted px-2 py-1 rounded-full font-mono">
-                      {col}
-                    </span>
-                  ))}
-                </div>
-              </>
-            )}
-
-            {status === "parsing" && (
-              <>
-                <Loader2 className="w-10 h-10 text-primary animate-spin" />
-                <p className="text-base font-medium text-foreground">Parsing file…</p>
-              </>
-            )}
-
-            {status === "confirming" && (
-              <>
-                <div className="w-16 h-16 rounded-2xl bg-secondary flex items-center justify-center">
-                  <FileText className="w-8 h-8 text-primary" />
-                </div>
-                <p className="text-base font-medium text-foreground">
-                  {parsedData.length} records ready — confirm in the dialog
-                </p>
-              </>
-            )}
-
-            {status === "uploading" && (
-              <>
-                <Loader2 className="w-10 h-10 text-primary animate-spin" />
-                <p className="text-base font-medium text-foreground">
-                  Saving records… ({uploadedCount} / {parsedData.length})
-                </p>
-                <div className="w-full max-w-xs bg-muted rounded-full h-2 overflow-hidden">
-                  <div
-                    className="h-full bg-primary transition-all duration-300 rounded-full"
-                    style={{ width: `${parsedData.length ? (uploadedCount / parsedData.length) * 100 : 0}%` }}
-                  />
-                </div>
-              </>
-            )}
-
-            {status === "success" && (
-              <>
-                <div className="w-16 h-16 rounded-2xl bg-success-muted flex items-center justify-center">
-                  <CheckCircle className="w-8 h-8 text-success" />
-                </div>
-                <div className="w-full max-w-md space-y-3">
-                  <p className="text-lg font-semibold text-success">
-                    {mergeSummary
-                      ? mergeSummary.inserted + mergeSummary.updated > 0
-                        ? `${mergeSummary.inserted + mergeSummary.updated} rows applied`
-                        : "No changes applied"
-                      : `${uploadedCount} records saved!`}
-                  </p>
-                  {mergeSummary ? (
-                    <p className="text-xs text-muted-foreground text-left">
-                      {mergeSummary.inserted} added, {mergeSummary.updated} updated, {mergeSummary.skipped} skipped
-                      {mergeSummary.invalid > 0 ? `, ${mergeSummary.invalid} invalid comment` : ""}.
+              ) : null}
+              {resultTab === "missing_prefixes" && showMissingPrefixesTab && missingMasterReport ? (
+                <div role="tabpanel" aria-label="Prefixes not in Master List" className="space-y-3">
+                  <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2.5 text-left text-sm text-foreground space-y-2">
+                    <p>
+                      <strong>{missingMasterReport.distinctPrefixCount}</strong>{" "}
+                      {missingMasterReport.distinctPrefixCount === 1 ? "prefix is" : "prefixes are"} not in the Master List
+                      {missingMasterReport.rowCount !== missingMasterReport.distinctPrefixCount
+                        ? ` (${missingMasterReport.rowCount} rows)`
+                        : ""}
+                      .
                     </p>
-                  ) : null}
-                  {mergeInvalidRows.length > 0 ? (
+                    <p className="text-xs text-muted-foreground">
+                      Add matching region codes in Master List so rates align with your reference data.
+                    </p>
                     <Button
                       type="button"
                       variant="secondary"
                       size="sm"
-                      className="w-full h-auto min-h-8 flex-col gap-1 py-2"
+                      className="w-full h-auto min-h-8 flex-col gap-1.5 py-2"
                       onClick={(e) => {
                         e.stopPropagation();
-                        downloadInvalidCommentRowsXlsx(mergeInvalidRows, fileName);
+                        downloadMissingPrefixesXlsx();
                       }}
                     >
                       <span className="flex items-center gap-2">
                         <FileDown className="w-4 h-4 shrink-0" />
-                        Download invalid comment rows (XLSX)
+                        Download XLSX
                       </span>
-                      {fileName ? (
+                      {missingPrefixesExportFilename ? (
                         <span className="w-full break-all text-center font-mono text-[11px] font-normal leading-tight text-muted-foreground">
-                          {buildInvalidCommentFilename(
-                            fileName.replace(/\.[^.]+$/i, ""),
-                            formatExportDateSlug(),
-                          )}
+                          {missingPrefixesExportFilename}
                         </span>
                       ) : null}
                     </Button>
-                  ) : null}
-                  <p className="text-sm text-muted-foreground">{fileName}</p>
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      resetState();
-                    }}
-                    className="flex items-center justify-center gap-1.5 w-full text-xs text-muted-foreground hover:text-destructive transition-colors pt-1"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                    Upload another file
-                  </button>
-                  {missingMasterReport && missingMasterReport.distinctPrefixCount > 0 ? (
-                    <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2.5 text-left text-sm text-foreground space-y-2">
-                      <p>
-                        <strong>{missingMasterReport.distinctPrefixCount}</strong>{" "}
-                        {missingMasterReport.distinctPrefixCount === 1 ? "prefix" : "prefixes"} not found in the Master List
-                        {missingMasterReport.rowCount !== missingMasterReport.distinctPrefixCount
-                          ? ` (${missingMasterReport.rowCount} rows)`
-                          : ""}
-                        .
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        Add matching region codes in Master List so rates align with your reference data.
-                      </p>
-                      <Button
-                        type="button"
-                        variant="secondary"
-                        size="sm"
-                        className="w-full h-auto min-h-8 flex-col gap-1.5 py-2"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          downloadMissingPrefixesXlsx();
-                        }}
-                      >
-                        <span className="flex items-center gap-2">
-                          <FileDown className="w-4 h-4 shrink-0" />
-                          Download XLSX
-                        </span>
-                        {missingPrefixesExportFilename ? (
-                          <span className="w-full break-all text-center font-mono text-[11px] font-normal leading-tight text-muted-foreground">
-                            {missingPrefixesExportFilename}
-                          </span>
-                        ) : null}
-                      </Button>
-                    </div>
-                  ) : missingMasterReport ? (
-                    <p className="text-xs text-muted-foreground">
-                      All prefixes in this file exist in the Master List.
-                    </p>
-                  ) : null}
+                  </div>
                 </div>
-              </>
-            )}
-
-            {status === "error" && parseErrors.length > 0 && parsedData.length === 0 && (
-              <>
-                <div className="w-16 h-16 rounded-2xl bg-destructive/10 flex items-center justify-center">
-                  <AlertCircle className="w-8 h-8 text-destructive" />
-                </div>
-                <p className="text-base font-medium text-destructive">
-                  Could not process the file
-                </p>
-              </>
-            )}
-          </div>
-
-          {/* File name badge */}
-          {fileName && status !== "idle" && (
-            <div className="absolute top-3 right-3 flex items-center gap-2 bg-muted text-muted-foreground text-xs px-3 py-1 rounded-full">
-              <FileText className="w-3 h-3" />
-              {fileName}
-              <button
-                onClick={(e) => { e.stopPropagation(); resetState(); }}
-                className="ml-1 hover:text-destructive transition-colors"
-              >
-                <X className="w-3 h-3" />
-              </button>
+              ) : null}
             </div>
-          )}
-        </div>
-
-        {/* Errors */}
-        {parseErrors.length > 0 && (
-          <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-4 space-y-3">
-            <p className="text-sm font-semibold text-destructive flex items-center gap-2">
-              <AlertCircle className="w-4 h-4" />
-              {parseErrors.length} error{parseErrors.length > 1 ? "s" : ""}
-            </p>
-            <ul className="space-y-1">
-              {parseErrors.slice(0, 8).map((err, i) => (
-                <li key={i} className="text-xs text-destructive/80 font-mono pl-2 border-l-2 border-destructive/30">
-                  {err.message}
-                </li>
-              ))}
-              {parseErrors.length > 8 && (
-                <li className="text-xs text-muted-foreground pl-2">
-                  …and {parseErrors.length - 8} more
-                </li>
-              )}
-            </ul>
-            <Button
-              type="button"
-              variant="secondary"
-              size="sm"
-              className="w-full sm:w-auto"
-              onClick={(e) => {
-                e.stopPropagation();
-                downloadParseErrorsXlsx(parseErrors, fileName);
-              }}
-            >
-              <FileDown className="w-4 h-4 mr-2" />
-              Download error rows (XLSX)
-            </Button>
           </div>
+        ) : (
+          renderDropZone()
         )}
       </div>
     </>

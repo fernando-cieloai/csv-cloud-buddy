@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { SortableNativeTh } from "@/components/ui/sortable-native-th";
 import { cycleSort, compareText, type SortState } from "@/lib/tableSort";
+import { normalizePrefixRaw } from "@/lib/quotationPrefixCanonical";
 
 interface CountryRegionRow {
   country: string;
@@ -35,10 +36,39 @@ const COL_ALIASES: [string, string[]][] = [
   ["country", ["country"]],
   ["region", ["region"]],
   ["region_code", ["regioncode", "region_code"]],
+  /** Second column in two-column master files (Region + Prefix). */
+  ["prefix", ["prefix", "dialing_prefix", "dialing prefix", "dialingcode", "dialing_code", "dialing code"]],
   ["effective_date", ["effectivedate", "effective_date", "effectiveda"]],
   ["valid_to", ["validto", "valid_to"]],
   ["date_added", ["dateadded", "date_added"]],
 ];
+
+/** Suffix after first hyphen → treat as network type and split country vs full region label (e.g. AFGHANISTAN-CELLULAR). */
+const REGION_NETWORK_SUFFIX = /^(CELLULAR|MOBILE|FIXED|LANDLINE|PSTN|WIRELESS|GSM|CDMA|LTE|UMTS|MVNO|5G|4G|3G)$/i;
+
+function colIdx(colMap: Record<string, number>, key: string): number {
+  const i = colMap[key];
+  return typeof i === "number" && i >= 0 ? i : -1;
+}
+
+function isRegionPrefixTwoColumnLayout(colMap: Record<string, number>): boolean {
+  const hasCountry = colIdx(colMap, "country") >= 0;
+  const hasRegion = colIdx(colMap, "region") >= 0;
+  const codeCol = colIdx(colMap, "prefix") >= 0 ? colIdx(colMap, "prefix") : colIdx(colMap, "region_code");
+  return !hasCountry && hasRegion && codeCol >= 0;
+}
+
+function deriveCountryAndRegionFromRegionLabel(regionLabel: string): { country: string; region: string } {
+  const raw = regionLabel.trim();
+  if (!raw) return { country: "", region: "" };
+  const i = raw.indexOf("-");
+  if (i <= 0) return { country: raw, region: raw };
+  const left = raw.slice(0, i).trim();
+  const right = raw.slice(i + 1).trim();
+  if (!left || !right) return { country: raw, region: raw };
+  if (REGION_NETWORK_SUFFIX.test(right)) return { country: left, region: raw };
+  return { country: raw, region: raw };
+}
 
 function buildColMap(header: string[]): Record<string, number> {
   const lower = header.map((h) => String(h).toLowerCase().trim().replace(/"/g, ""));
@@ -78,6 +108,7 @@ function parseCSV(text: string): { data: CountryRegionRow[]; errors: ParseError[
 
   const header = lines[0].split(",").map((h) => h.trim().replace(/"/g, ""));
   const colMap = buildColMap(header);
+  const twoCol = isRegionPrefixTwoColumnLayout(colMap);
 
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i].trim();
@@ -85,22 +116,42 @@ function parseCSV(text: string): { data: CountryRegionRow[]; errors: ParseError[
 
     const cols = line.split(",").map((c) => c.trim().replace(/"/g, ""));
 
-    const country = colMap["country"] >= 0 ? cols[colMap["country"]] : cols[0];
-    const region = colMap["region"] >= 0 ? cols[colMap["region"]] : cols[1];
-    const regionCode = colMap["region_code"] >= 0 ? cols[colMap["region_code"]] : cols[2];
+    let country: string;
+    let region: string;
+    let regionCode: string;
 
-    if (!country?.trim() || !region?.trim() || !regionCode?.trim()) {
-      errors.push({ row: i + 1, message: `Row ${i + 1}: missing Country, Region or RegionCode.` });
-      continue;
+    if (twoCol) {
+      const ri = colIdx(colMap, "region");
+      const ci = colIdx(colMap, "prefix") >= 0 ? colIdx(colMap, "prefix") : colIdx(colMap, "region_code");
+      const regionLabel = cols[ri] ?? "";
+      regionCode = String(cols[ci] ?? "").trim();
+      const derived = deriveCountryAndRegionFromRegionLabel(regionLabel);
+      country = derived.country;
+      region = derived.region;
+      if (!country || !region || !regionCode) {
+        errors.push({ row: i + 1, message: `Row ${i + 1}: missing Region or Prefix.` });
+        continue;
+      }
+    } else {
+      country = colIdx(colMap, "country") >= 0 ? cols[colIdx(colMap, "country")] : cols[0];
+      region = colIdx(colMap, "region") >= 0 ? cols[colIdx(colMap, "region")] : cols[1];
+      regionCode = colIdx(colMap, "region_code") >= 0 ? cols[colIdx(colMap, "region_code")] : cols[2];
+      if (!country?.trim() || !region?.trim() || !regionCode?.trim()) {
+        errors.push({ row: i + 1, message: `Row ${i + 1}: missing Country, Region or RegionCode.` });
+        continue;
+      }
+      country = country.trim();
+      region = region.trim();
+      regionCode = String(regionCode).trim();
     }
 
     data.push({
       country: country.trim(),
       region: region.trim(),
-      region_code: String(regionCode).trim(),
-      effective_date: parseDate(colMap["effective_date"] >= 0 ? cols[colMap["effective_date"]] : undefined),
-      valid_to: parseDate(colMap["valid_to"] >= 0 ? cols[colMap["valid_to"]] : undefined),
-      date_added: parseDate(colMap["date_added"] >= 0 ? cols[colMap["date_added"]] : undefined),
+      region_code: normalizePrefixRaw(String(regionCode)),
+      effective_date: parseDate(colIdx(colMap, "effective_date") >= 0 ? cols[colIdx(colMap, "effective_date")] : undefined),
+      valid_to: parseDate(colIdx(colMap, "valid_to") >= 0 ? cols[colIdx(colMap, "valid_to")] : undefined),
+      date_added: parseDate(colIdx(colMap, "date_added") >= 0 ? cols[colIdx(colMap, "date_added")] : undefined),
     });
   }
 
@@ -129,6 +180,7 @@ function parseXLSX(buffer: ArrayBuffer): { data: CountryRegionRow[]; errors: Par
 
     const header = rows[0].map((c) => String(c ?? ""));
     const colMap = buildColMap(header);
+    const twoCol = isRegionPrefixTwoColumnLayout(colMap);
 
     for (let i = 1; i < rows.length; i++) {
       const row = rows[i];
@@ -136,19 +188,42 @@ function parseXLSX(buffer: ArrayBuffer): { data: CountryRegionRow[]; errors: Par
 
       const cols = row.map((c) => String(c ?? "").trim());
 
-      const country = colMap["country"] >= 0 ? cols[colMap["country"]] : cols[0];
-      const region = colMap["region"] >= 0 ? cols[colMap["region"]] : cols[1];
-      const regionCode = colMap["region_code"] >= 0 ? cols[colMap["region_code"]] : cols[2];
+      let country: string;
+      let region: string;
+      let regionCode: string;
 
-      if (!country?.trim() || !region?.trim() || !regionCode?.trim()) continue;
+      if (twoCol) {
+        const ri = colIdx(colMap, "region");
+        const ci = colIdx(colMap, "prefix") >= 0 ? colIdx(colMap, "prefix") : colIdx(colMap, "region_code");
+        const regionLabel = cols[ri] ?? "";
+        regionCode = String(cols[ci] ?? "").trim();
+        const derived = deriveCountryAndRegionFromRegionLabel(regionLabel);
+        country = derived.country;
+        region = derived.region;
+        if (!country || !region || !regionCode) {
+          errors.push({ row: i + 1, message: `Row ${i + 1}: missing Region or Prefix.` });
+          continue;
+        }
+      } else {
+        country = colIdx(colMap, "country") >= 0 ? cols[colIdx(colMap, "country")] : cols[0];
+        region = colIdx(colMap, "region") >= 0 ? cols[colIdx(colMap, "region")] : cols[1];
+        regionCode = colIdx(colMap, "region_code") >= 0 ? cols[colIdx(colMap, "region_code")] : cols[2];
+        if (!country?.trim() || !region?.trim() || !regionCode?.trim()) {
+          errors.push({ row: i + 1, message: `Row ${i + 1}: missing Country, Region or RegionCode.` });
+          continue;
+        }
+        country = country.trim();
+        region = region.trim();
+        regionCode = String(regionCode).trim();
+      }
 
       data.push({
         country: country.trim(),
         region: region.trim(),
-        region_code: String(regionCode).trim(),
-        effective_date: parseDate(colMap["effective_date"] >= 0 ? cols[colMap["effective_date"]] : undefined),
-        valid_to: parseDate(colMap["valid_to"] >= 0 ? cols[colMap["valid_to"]] : undefined),
-        date_added: parseDate(colMap["date_added"] >= 0 ? cols[colMap["date_added"]] : undefined),
+        region_code: normalizePrefixRaw(String(regionCode)),
+        effective_date: parseDate(colIdx(colMap, "effective_date") >= 0 ? cols[colIdx(colMap, "effective_date")] : undefined),
+        valid_to: parseDate(colIdx(colMap, "valid_to") >= 0 ? cols[colIdx(colMap, "valid_to")] : undefined),
+        date_added: parseDate(colIdx(colMap, "date_added") >= 0 ? cols[colIdx(colMap, "date_added")] : undefined),
       });
     }
   } catch (e) {
@@ -362,7 +437,7 @@ export default function CountriesFileUploader({ onSuccess, compact = false }: Co
                   <p className="text-sm text-muted-foreground mt-1">Drag CSV or XLSX here or click</p>
                 </div>
                 <div className="flex gap-2 flex-wrap justify-center text-xs text-muted-foreground">
-                  {["Country", "Region", "RegionCode"].map((col) => (
+                  {["Country · Region · RegionCode", "or Region · Prefix"].map((col) => (
                     <span key={col} className="bg-muted px-2 py-1 rounded-full font-mono">
                       {col}
                     </span>
