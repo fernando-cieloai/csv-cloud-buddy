@@ -802,13 +802,20 @@ export default function CsvUploader({ vendorId, vendorName: vendorNameProp, onSu
       return;
     }
 
-    const existingRates: { id: string; country: string; network: string; prefix: string; rate_type: string }[] = [];
+    const existingRates: {
+      id: string;
+      country: string;
+      network: string;
+      prefix: string;
+      rate_type: string;
+      rate: number;
+    }[] = [];
     let from = 0;
     const phoneRatesPage = 5000;
     while (true) {
       const { data: page, error: pgErr } = await supabase
         .from("phone_rates")
-        .select("id, country, network, prefix, rate_type")
+        .select("id, country, network, prefix, rate_type, rate")
         .eq("upload_id", uploadId)
         .range(from, from + phoneRatesPage - 1);
       if (pgErr) {
@@ -821,34 +828,25 @@ export default function CsvUploader({ vendorId, vendorName: vendorNameProp, onSu
       from += page.length;
     }
 
-    const keyToId = new Map<string, string>();
+    const keyToExisting = new Map<string, { id: string; rate: number }>();
     for (const r of existingRates) {
-      keyToId.set(rateRowKey(r.country, r.network, r.prefix, r.rate_type), r.id);
+      keyToExisting.set(rateRowKey(r.country, r.network, r.prefix, r.rate_type), {
+        id: r.id,
+        rate: r.rate,
+      });
     }
 
     const toInsert: Record<string, unknown>[] = [];
     const toUpdate: { id: string; patch: Record<string, unknown> }[] = [];
     let skipped = 0;
-    let invalid = 0;
-    const invalidCommentRows: PhoneRate[] = [];
 
     for (const row of data) {
       const country = resolveCountry(row.prefix, row.country);
       const rate_type = row.rate_type ?? "International";
-      const norm = normalizeUploadComment(row.comment);
       const key = rateRowKey(country, row.network, row.prefix, rate_type);
+      const existing = keyToExisting.get(key);
 
-      if (norm === null) {
-        invalid++;
-        invalidCommentRows.push({ ...row, country, rate_type });
-        continue;
-      }
-      if (norm === "empty" || norm === "NO_CHANGES") {
-        skipped++;
-        continue;
-      }
-
-      if (norm === "NEW_BRAND") {
+      if (!existing) {
         toInsert.push({
           upload_id: uploadId,
           country,
@@ -861,23 +859,22 @@ export default function CsvUploader({ vendorId, vendorName: vendorNameProp, onSu
         continue;
       }
 
-      if (norm === "INCREMENT" || norm === "DECREMENT") {
-        const id = keyToId.get(key);
-        if (!id) {
-          skipped++;
-          continue;
-        }
+      const nextRate = roundUpTo3Decimals(row.rate);
+      const prevRate = roundUpTo3Decimals(Number(existing.rate));
+      if (nextRate !== prevRate) {
         toUpdate.push({
-          id,
+          id: existing.id,
           patch: {
             country,
             network: row.network,
             prefix: row.prefix,
             rate: row.rate,
             rate_type,
-            comment: UPLOAD_COMMENT[norm],
+            comment: null,
           },
         });
+      } else {
+        skipped++;
       }
     }
 
@@ -918,17 +915,11 @@ export default function CsvUploader({ vendorId, vendorName: vendorNameProp, onSu
       inserted: toInsert.length,
       updated: toUpdate.length,
       skipped,
-      invalid,
+      invalid: 0,
     });
-    setMergeInvalidRows(invalidCommentRows);
-    if (invalid > 0) {
-      toast.warning(
-        `${invalid} row${invalid === 1 ? "" : "s"} had an invalid comment (use: No changes, Increment, Decrement, New brand).`,
-        { duration: 8000 },
-      );
-    }
+    setMergeInvalidRows([]);
     if (totalWork === 0) {
-      toast.info("No rows to apply (all lines were No changes or empty comment).");
+      toast.info("No rows to apply (all rates unchanged and no new prefixes).");
     }
     setUploadedCount(totalWork);
     await finishSuccess();
@@ -1060,7 +1051,7 @@ export default function CsvUploader({ vendorId, vendorName: vendorNameProp, onSu
               {mergeSummary ? (
                 <p className="text-xs text-muted-foreground text-left">
                   {mergeSummary.inserted} added, {mergeSummary.updated} updated, {mergeSummary.skipped} skipped
-                  {mergeSummary.invalid > 0 ? `, ${mergeSummary.invalid} invalid comment` : ""}.
+                  (unchanged rate).
                 </p>
               ) : null}
               {mergeInvalidRows.length > 0 ? (
@@ -1183,9 +1174,11 @@ export default function CsvUploader({ vendorId, vendorName: vendorNameProp, onSu
                       >
                         <span className="font-medium text-foreground">Field update (merge)</span>
                         <span className="block text-xs text-muted-foreground mt-0.5">
-                          Requires a vendor. Add a <code className="text-[11px]">comment</code> column with:{" "}
-                          <em>No changes</em>, <em>Increment</em>, <em>Decrement</em>, or <em>New brand</em>.{" "}
-                          No changes = skip; New brand = add prefix; Increment/Decrement = update matching row.
+                          Requires a vendor. Rows that match an existing country / network / prefix / rate type are
+                          updated only when the <strong className="text-foreground">rate</strong> differs. Any
+                          combination not in the current file is added as a new row. Optional{" "}
+                          <code className="text-[11px]">comment</code> is stored on replace imports; merge does not use
+                          it to decide updates.
                         </span>
                       </label>
                     </div>

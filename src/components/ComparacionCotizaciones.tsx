@@ -523,9 +523,14 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
       selectedVendorIdsForFetch.size > 0
         ? vendorsWithUploadRaw.filter((v) => selectedVendorIdsForFetch.has(v.id))
         : vendorsWithUploadRaw;
-    return uploads
-      .filter((u) => u.vendor_id && vendorList.some((v) => v.id === u.vendor_id))
-      .map((u) => u.id);
+    const vendorIdSet = new Set(vendorList.map((v) => v.id));
+    // `uploads` is ordered newest-first; quotation must use the current file per vendor only.
+    const uploadIdByVendor = new Map<string, string>();
+    for (const u of uploads) {
+      if (!u.vendor_id || !vendorIdSet.has(u.vendor_id)) continue;
+      if (!uploadIdByVendor.has(u.vendor_id)) uploadIdByVendor.set(u.vendor_id, u.id);
+    }
+    return Array.from(uploadIdByVendor.values());
   }, [uploads, selectedVendorIdsForFetch, vendorsWithUploadRaw]);
 
   const fetchRatesRequestId = useRef(0);
