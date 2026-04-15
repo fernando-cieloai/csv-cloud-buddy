@@ -706,12 +706,6 @@ export default function CsvUploader({ vendorId, vendorName: vendorNameProp, onSu
             },
       );
       setStatus("success");
-      if (distinctMissingPrefixes.size > 0) {
-        toast.warning(
-          `${distinctMissingPrefixes.size} prefix${distinctMissingPrefixes.size === 1 ? "" : "es"} not in Master List (${rowsWithMissingPrefix} row${rowsWithMissingPrefix === 1 ? "" : "s"}). Open the "Prefixes not in Master List" tab to download a report.`,
-          { duration: 12000 },
-        );
-      }
       onSuccess?.();
     };
 
