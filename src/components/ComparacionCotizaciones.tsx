@@ -3,7 +3,11 @@ import { supabase } from "@/integrations/supabase/client";
 import { RefreshCw, Search, ChevronDown, ChevronLeft, ChevronRight, Building2, Save, FileDown, DollarSign, AlertCircle, FolderPlus, Plus } from "lucide-react";
 import * as XLSX from "xlsx";
 import { toast } from "sonner";
-import { QUOTATION_EXPORT_HEADERS, QUOTATION_DEFAULTS } from "@/lib/vendorTemplate";
+import {
+  QUOTATION_EXPORT_HEADERS,
+  QUOTATION_SUMMARY_EXPORT_HEADERS,
+  QUOTATION_DEFAULTS,
+} from "@/lib/vendorTemplate";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
@@ -28,6 +32,34 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { roundUpTo3Decimals, formatRate, formatRateFull, formatMarginAmount, formatPercent } from "@/lib/utils";
 import { SortableNativeTh } from "@/components/ui/sortable-native-th";
 import { cycleSort, compareText, compareNumber, type SortState } from "@/lib/tableSort";
+import { buildNetworkSummaryRows, type NetworkSummaryRow } from "@/lib/quotationNetworkSummary";
+import {
+  expandCountryLabelsForMatching,
+  quotationCountryCanonicalKey,
+  quotationCountryPickerLabel,
+} from "@/lib/quotationCountrySummaryIso";
+
+/**
+ * Matches expanded country filter tokens against RPC country_filter_key, canonical ISO/name key,
+ * or vendor country text containing a selected label (≥5 chars) — aligned with
+ * quotation_country_row_match_key + country substring in SQL.
+ */
+function countryRowMatchesExpandedFilter(
+  country: string | null | undefined,
+  countryFilterKey: string | null | undefined,
+  countryFilterLower: Set<string>,
+): boolean {
+  if (countryFilterLower.size === 0) return true;
+  const ck = (countryFilterKey ?? "").trim().toLowerCase();
+  if (ck && countryFilterLower.has(ck)) return true;
+  const canon = quotationCountryCanonicalKey(country ?? "").trim().toLowerCase();
+  if (canon && countryFilterLower.has(canon)) return true;
+  const c = (country ?? "").trim().toLowerCase();
+  for (const label of countryFilterLower) {
+    if (label.length >= 5 && c.includes(label)) return true;
+  }
+  return false;
+}
 
 interface Client {
   id: string;
@@ -62,6 +94,8 @@ interface AggregatedRateRow {
   prefixes: string[];
   rate: number;
   from_master_list?: boolean;
+  /** Lowercase token for country filter: first segment of vendor network before '-', else phone_rates.country */
+  country_filter_key?: string | null;
 }
 
 const RATE_TYPES = ["International", "Origin Based", "Local"] as const;
@@ -76,6 +110,16 @@ function getRateType(rate_type: string | null): RateType {
   const match = RATE_TYPES.find((rt) => rt.toLowerCase() === lower);
   return (match as RateType) ?? "International";
 }
+
+/** Chunk size per `get_quotation_rates_page` call (full result set is assembled by paging until `rowTotal`). */
+const QUOTATION_BULK_FETCH_PAGE_SIZE = 10_000;
+
+type QuotationTableDataRow = {
+  country: string;
+  networkLabel: string;
+  byVendor: Map<string, Partial<Record<RateType, { prefixes: string[]; rate: number; ratePlusExtra?: number | null }>>>;
+  fromMasterList?: boolean;
+};
 
 /** Alternating gray / white bands for quotation table column zones (segment 0 = gray). */
 const QT_STRIPE_GRAY = "bg-muted/70 dark:bg-muted/45";
@@ -169,6 +213,8 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
   const [ratesLoading, setRatesLoading] = useState(false);
   const [exportingOrSaving, setExportingOrSaving] = useState(false);
   const [countriesSearch, setCountriesSearch] = useState("");
+  /** Distinct country tokens from uploaded vendor files (network prefix + country column); merged into country picker */
+  const [countryLabelsFromFiles, setCountryLabelsFromFiles] = useState<string[]>([]);
   const [filterMode, setFilterMode] = useState<"countries" | "groups">("countries");
   const [selectedGroups, setSelectedGroups] = useState<Set<string>>(new Set());
   const [groupsSearch, setGroupsSearch] = useState("");
@@ -178,6 +224,10 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
   const [quotationTableSort, setQuotationTableSort] = useState<SortState<string>>(null);
   const [hasApplied, setHasApplied] = useState(false);
   const [onlyMasterListNetworks, setOnlyMasterListNetworks] = useState(false);
+  /** Comparison = current multi-vendor table; network_summary = Country / ISO / Type / Min / Max / Avg / Prefixes (base country = text before first hyphen) */
+  const [quotationTableFormat, setQuotationTableFormat] = useState<"comparison" | "network_summary">("comparison");
+  const [summaryFetchedRows, setSummaryFetchedRows] = useState<QuotationTableDataRow[]>([]);
+  const [summaryFormatLoading, setSummaryFormatLoading] = useState(false);
   const [createGroupDialogOpen, setCreateGroupDialogOpen] = useState(false);
   const [createGroupSource, setCreateGroupSource] = useState<"countries" | "groups">("countries");
   const [createGroupNombre, setCreateGroupNombre] = useState("");
@@ -281,9 +331,21 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
     return Array.from(byId.values());
   }, [vendorsWithUploadRaw, editQuotation]);
 
+  /** One entry per base country token (text before first hyphen), same rule as Country summary — no network suffixes in the picker. */
   const allCountries = useMemo(() => {
-    return countriesFromDb.map((c) => c.nombre).sort((a, b) => a.localeCompare(b));
-  }, [countriesFromDb]);
+    const set = new Set<string>();
+    for (const c of countriesFromDb) {
+      const base = quotationCountryCanonicalKey(c.nombre);
+      if (base) set.add(base);
+    }
+    for (const lab of countryLabelsFromFiles) {
+      const base = quotationCountryCanonicalKey(lab);
+      if (base) set.add(base);
+    }
+    return [...set].sort((a, b) =>
+      quotationCountryPickerLabel(a).localeCompare(quotationCountryPickerLabel(b)),
+    );
+  }, [countriesFromDb, countryLabelsFromFiles]);
 
   const countryIdToNombre = useMemo(() => {
     const m = new Map<string, string>();
@@ -296,8 +358,10 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
     for (const cg of countryGroupsFromDb) {
       const nombre = countryIdToNombre.get(cg.country_id);
       if (nombre) {
+        const base = quotationCountryCanonicalKey(nombre);
+        if (!base) continue;
         const list = m.get(cg.group_id) ?? [];
-        list.push(nombre);
+        list.push(base);
         m.set(cg.group_id, list);
       }
     }
@@ -326,7 +390,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
           return;
         }
         countryIds = countriesFromDb
-          .filter((c) => selectedCountries.has(c.nombre))
+          .filter((c) => selectedCountries.has(quotationCountryCanonicalKey(c.nombre)))
           .map((c) => c.id);
       } else {
         if (selectedGroups.size < 2) {
@@ -338,7 +402,9 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
         for (const gid of selectedGroups) {
           for (const n of countriesByGroupId.get(gid) ?? []) countryNames.add(n);
         }
-        countryIds = countriesFromDb.filter((c) => countryNames.has(c.nombre)).map((c) => c.id);
+        countryIds = countriesFromDb
+          .filter((c) => countryNames.has(quotationCountryCanonicalKey(c.nombre)))
+          .map((c) => c.id);
       }
       const { data: newGroup, error: insertError } = await supabase
         .from("groups")
@@ -372,9 +438,13 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
   };
 
   const filteredCountries = useMemo(() => {
-    const q = countriesSearch.trim().toLowerCase();
-    if (!q) return allCountries;
-    return allCountries.filter((c) => c.toLowerCase().includes(q));
+    const q = countriesSearch.replace(/^\s+/u, "").toLowerCase();
+    if (!countriesSearch.trim()) return allCountries;
+    return allCountries.filter((c) => {
+      const key = c.toLowerCase();
+      const label = quotationCountryPickerLabel(c).toLowerCase();
+      return key.includes(q) || label.includes(q);
+    });
   }, [allCountries, countriesSearch]);
 
   const groupsWithCount = useMemo(() => {
@@ -402,10 +472,16 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
     return selectedCountries;
   }, [filterMode, selectedGroups, countriesByGroupId, selectedCountries]);
 
-  /** Stable key so effects refetch when the set contents change (not only reference). */
-  const effectiveCountryFilterKey = useMemo(
-    () => [...effectiveCountryFilter].sort().join("\0"),
+  /** Names + ISO tokens (mx, ar, …) so RPC matches vendor files that use MX-… instead of “Mexico”. */
+  const expandedCountryFilter = useMemo(
+    () => expandCountryLabelsForMatching(effectiveCountryFilter),
     [effectiveCountryFilter],
+  );
+
+  /** Stable key so effects refetch when the expanded set contents change (not only reference). */
+  const quotationCountryFilterKey = useMemo(
+    () => [...expandedCountryFilter].sort().join("\0"),
+    [expandedCountryFilter],
   );
 
   const toggleGroup = (groupId: string) => {
@@ -533,6 +609,30 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
     return Array.from(uploadIdByVendor.values());
   }, [uploads, selectedVendorIdsForFetch, vendorsWithUploadRaw]);
 
+  useEffect(() => {
+    const ids = getUploadIdsForRates;
+    if (ids.length === 0) {
+      setCountryLabelsFromFiles([]);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const { data, error } = await supabase.rpc("get_quotation_country_filter_labels", {
+        p_upload_ids: ids,
+      });
+      if (cancelled) return;
+      if (error) {
+        setCountryLabelsFromFiles([]);
+        return;
+      }
+      const rows = (data ?? []) as { label: string }[];
+      setCountryLabelsFromFiles(rows.map((r) => r.label).filter((s) => (s ?? "").trim().length > 0));
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [getUploadIdsForRates]);
+
   const fetchRatesRequestId = useRef(0);
   const fetchRates = React.useCallback(async () => {
     const uploadIds = getUploadIdsForRates;
@@ -550,7 +650,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
     setRatesLoading(true);
     try {
       const countryFilterArr =
-        effectiveCountryFilter.size > 0 ? Array.from(effectiveCountryFilter) : null;
+        expandedCountryFilter.size > 0 ? Array.from(expandedCountryFilter) : null;
       const searchVal = debouncedSearch.trim() || null;
 
       const rpcOpts = {
@@ -610,7 +710,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
     }
   }, [
     getUploadIdsForRates,
-    effectiveCountryFilter,
+    expandedCountryFilter,
     debouncedSearch,
     searchBy,
     page,
@@ -641,7 +741,13 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
       const snap = q.snapshot;
       setSaveName(q.name ?? "");
       setSaveClientId(q.client_id ?? "__none__");
-      const uniqueCountries = [...new Set((snap.rows ?? []).map((r) => r.country))];
+      const uniqueCountries = [
+        ...new Set(
+          (snap.rows ?? [])
+            .map((r) => quotationCountryCanonicalKey(String((r as { country?: string }).country ?? "")))
+            .filter(Boolean),
+        ),
+      ];
       setSelectedCountries(new Set(uniqueCountries));
       setSelectedGroups(new Set());
       setFilterMode("countries");
@@ -680,19 +786,24 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
     setPage(1);
   }, [effectiveCountryFilter, debouncedSearch, searchBy, selectedColumnPairs]);
 
+  useEffect(() => {
+    setPage(1);
+  }, [quotationTableFormat]);
+
   /** Avoid showing previous filter’s rows/count while the new RPC is in flight. */
   useEffect(() => {
     if (editQuotationId) return;
     setRates([]);
     setTotalNetworkRows(0);
-  }, [effectiveCountryFilterKey, editQuotationId]);
+  }, [quotationCountryFilterKey, editQuotationId]);
 
   useEffect(() => {
     if (editQuotationId || !hasApplied) return;
+    if (quotationTableFormat === "network_summary") return;
     if (!loading && uploads.length > 0) {
       fetchRates();
     }
-  }, [loading, uploads.length, fetchRates, editQuotationId, hasApplied, effectiveCountryFilterKey]);
+  }, [loading, uploads.length, fetchRates, editQuotationId, hasApplied, quotationCountryFilterKey, quotationTableFormat]);
 
   const toggleCountry = (country: string) => {
     setSelectedCountries((prev) => {
@@ -771,22 +882,30 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
     vendorList: Vendor[],
   ) => {
     const countryFilterLower = new Set([...countryFilter].map((c) => c.trim().toLowerCase()));
-    const countryMatches = (country: string | null | undefined) => {
-      const norm = (country ?? "").trim().toLowerCase();
-      return countryFilter.size === 0 ? true : countryFilterLower.has(norm);
+    const countryMatchesAggregated = (row: AggregatedRateRow) => {
+      return countryRowMatchesExpandedFilter(row.country, row.country_filter_key, countryFilterLower);
     };
     const keyToRow = new Map<
       string,
-      { country: string; network: string; prefixKey: string; maxRate: number; fromMasterList: boolean; byVendor: Map<string, Partial<Record<RateType, VendorCellByType>>> }
+      {
+        country: string;
+        network: string;
+        prefixKey: string;
+        maxRate: number;
+        fromMasterList: boolean;
+        country_filter_key: string;
+        byVendor: Map<string, Partial<Record<RateType, VendorCellByType>>>;
+      }
     >();
     for (const row of r) {
-      if (!countryMatches(row.country)) continue;
+      if (!countryMatchesAggregated(row)) continue;
       const u = uploadById.get(row.upload_id);
       if (!u?.vendor_id || !vendorList.some((v) => v.id === u.vendor_id)) continue;
       const rateType = getRateType(row.rate_type ?? null);
       const network = (row.network ?? "").trim() || "Unknown";
       const prefixKey = [...new Set((row.prefixes ?? []).map((p) => p.trim()).filter(Boolean))].sort().join("|");
       const rowKey = `${row.country}\t${network}\t${prefixKey || "_empty"}`;
+      const ck = (row.country_filter_key ?? row.country ?? "").trim().toLowerCase();
       if (!keyToRow.has(rowKey))
         keyToRow.set(rowKey, {
           country: row.country,
@@ -794,9 +913,11 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
           prefixKey,
           maxRate: row.rate,
           fromMasterList: row.from_master_list !== false,
+          country_filter_key: ck,
           byVendor: new Map(),
         });
       const tr = keyToRow.get(rowKey)!;
+      if (ck && (!tr.country_filter_key || ck < tr.country_filter_key)) tr.country_filter_key = ck;
       if (row.rate > tr.maxRate) tr.maxRate = row.rate;
       if (row.from_master_list === false) tr.fromMasterList = false;
       if (!tr.byVendor.has(u.vendor_id)) tr.byVendor.set(u.vendor_id, {});
@@ -808,7 +929,9 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
     }
     let list = Array.from(keyToRow.values()).filter((row) => row.byVendor.size > 0);
     if (countryFilter.size > 0) {
-      list = list.filter((row) => countryMatches(row.country));
+      list = list.filter((row) =>
+        countryRowMatchesExpandedFilter(row.country, row.country_filter_key, countryFilterLower),
+      );
     }
     list.sort((a, b) => {
       const ca = (a.country ?? "").trim();
@@ -845,7 +968,12 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
     snapshot: SavedQuotation["snapshot"],
     searchQ: string,
     searchByMode: "country" | "prefix" | "type"
-  ): { country: string; networkLabel: string; byVendor: Map<string, Partial<Record<RateType, VendorCellByType>>> }[] => {
+  ): {
+    country: string;
+    networkLabel: string;
+    byVendor: Map<string, Partial<Record<RateType, VendorCellByType>>>;
+    fromMasterList: boolean;
+  }[] => {
     const rateTypes = (snapshot.rateTypes ?? RATE_TYPES) as readonly string[];
     const rows = snapshot.rows ?? [];
     const list = rows.map((row) => {
@@ -894,40 +1022,136 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
     return filtered;
   };
 
-  const fetchAllRatesForExport = async () => {
+  const loadAllQuotationDetailRows = React.useCallback(async (): Promise<QuotationTableDataRow[]> => {
     if (editQuotation) {
-      return buildTableRowsFromSnapshot(editQuotation.snapshot, search.toLowerCase().trim(), searchBy);
+      return buildTableRowsFromSnapshot(editQuotation.snapshot, search.toLowerCase().trim(), searchBy) as QuotationTableDataRow[];
     }
     const uploadIds = getUploadIdsForRates;
     if (uploadIds.length === 0) return [];
-      const vendorList =
+    /** Without a country filter the RPC intentionally returns every row in the uploads — never bulk-load that by mistake. */
+    if (effectiveCountryFilter.size === 0) return [];
+    const vendorList =
       selectedVendorIdsForFetch.size > 0
         ? vendorsWithUploadRaw.filter((v) => selectedVendorIdsForFetch.has(v.id))
         : vendorsWithUploadRaw;
     const countryFilterArr =
-      effectiveCountryFilter.size > 0 ? Array.from(effectiveCountryFilter) : null;
+      expandedCountryFilter.size > 0 ? Array.from(expandedCountryFilter) : null;
     const searchVal = debouncedSearch.trim() || null;
-    let allAggregated: AggregatedRateRow[] = [];
-    const pages = Math.ceil(totalNetworkRows / pageSize) || 1;
-    for (let i = 0; i < pages; i++) {
-      const { data } = await supabase.rpc("get_quotation_rates_page", {
-        p_upload_ids: uploadIds,
-        p_country_filter: countryFilterArr,
-        p_search: searchVal,
-        p_limit: pageSize,
-        p_offset: i * pageSize,
-        p_search_by: searchBy,
+    const rpcOpts = {
+      p_upload_ids: uploadIds,
+      p_country_filter: countryFilterArr,
+      p_search: searchVal,
+      p_search_by: searchBy,
+    };
+    /** Count first so we page until all aggregated rows are loaded (no artificial cap). */
+    const { data: cnt, error: cntErr } = await supabase.rpc("get_quotation_networks_count", rpcOpts);
+    if (cntErr) throw new Error(cntErr.message);
+    const rowTotal = Number(cnt ?? 0);
+    if (rowTotal <= 0) return [];
+
+    const allAggregated: AggregatedRateRow[] = [];
+    /** Keep paging until we have rowTotal rows or an empty chunk. Do not break on chunk.length < pageLimit:
+     * PostgREST may cap responses below the requested limit, and the old for-loop stride (10k) skipped offsets. */
+    while (allAggregated.length < rowTotal) {
+      const remaining = rowTotal - allAggregated.length;
+      const pageLimit = Math.min(QUOTATION_BULK_FETCH_PAGE_SIZE, remaining);
+      const { data, error } = await supabase.rpc("get_quotation_rates_page", {
+        ...rpcOpts,
+        p_limit: pageLimit,
+        p_offset: allAggregated.length,
       });
-      allAggregated = allAggregated.concat((data ?? []) as AggregatedRateRow[]);
+      if (error) throw new Error(error.message);
+      const chunk = (data ?? []) as AggregatedRateRow[];
+      if (chunk.length === 0) break;
+      allAggregated.push(...chunk);
     }
-    return buildTableRowsFromAggregated(allAggregated, effectiveCountryFilter, vendorList);
-  };
+
+    return buildTableRowsFromAggregated(allAggregated, expandedCountryFilter, vendorList) as QuotationTableDataRow[];
+  }, [
+    editQuotation,
+    search,
+    searchBy,
+    getUploadIdsForRates,
+    selectedVendorIdsForFetch,
+    vendorsWithUploadRaw,
+    expandedCountryFilter,
+    effectiveCountryFilter,
+    debouncedSearch,
+  ]);
+
+  const fetchAllRatesForExport = async () => loadAllQuotationDetailRows();
+
+  useEffect(() => {
+    if (quotationTableFormat !== "network_summary") {
+      setSummaryFetchedRows([]);
+      setSummaryFormatLoading(false);
+      return;
+    }
+    if (editQuotationId) {
+      setSummaryFetchedRows([]);
+      setSummaryFormatLoading(false);
+      return;
+    }
+    if (!hasApplied) return;
+    if (getUploadIdsForRates.length === 0) {
+      setSummaryFetchedRows([]);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      setSummaryFormatLoading(true);
+      try {
+        const rows = await loadAllQuotationDetailRows();
+        if (!cancelled) setSummaryFetchedRows(rows);
+      } catch {
+        if (!cancelled) setSummaryFetchedRows([]);
+      } finally {
+        if (!cancelled) setSummaryFormatLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    quotationTableFormat,
+    editQuotationId,
+    hasApplied,
+    getUploadIdsForRates,
+    loadAllQuotationDetailRows,
+    quotationCountryFilterKey,
+    debouncedSearch,
+    searchBy,
+  ]);
 
   const handleExportXlsx = async () => {
-    if (selectedColumnsList.length === 0 || totalNetworkRows === 0) return;
+    if (selectedColumnsList.length === 0) return;
+    if (quotationTableFormat === "network_summary") {
+      if (networkSummaryRows.length === 0) return;
+    } else if (totalNetworkRows === 0) {
+      return;
+    }
     setExportingOrSaving(true);
     toast.info("Preparing export…");
     try {
+      if (quotationTableFormat === "network_summary") {
+        const headerRow = [...QUOTATION_SUMMARY_EXPORT_HEADERS];
+        const dataRows = networkSummaryRows.map((row) => [
+          quotationCountryPickerLabel(row.country ?? ""),
+          row.isoCode ?? "",
+          row.lineType,
+          row.min != null ? roundUpTo3Decimals(row.min) : "",
+          row.max != null ? roundUpTo3Decimals(row.max) : "",
+          row.avg != null ? roundUpTo3Decimals(row.avg) : "",
+          row.prefixCount,
+        ]);
+        const ws = XLSX.utils.aoa_to_sheet([headerRow, ...dataRows]);
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, "Country summary");
+        XLSX.writeFile(wb, `quotation-country-summary-${new Date().toISOString().slice(0, 10)}.xlsx`);
+        toast.success("Exported as XLSX");
+        return;
+      }
+
       const rowsToExport = await fetchAllRatesForExport();
       if (rowsToExport.length === 0) {
         toast.error("No data to export");
@@ -964,7 +1188,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
             : null;
         const network = row.networkLabel ?? "";
         return [
-          (row.country ?? "").toUpperCase(),
+          quotationCountryPickerLabel(row.country ?? ""),
           network,
           effectiveSellRate != null ? roundUpTo3Decimals(effectiveSellRate) : "",
           effectiveDate,
@@ -1175,8 +1399,8 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
     () =>
       editQuotation?.snapshot?.rows?.length
         ? buildTableRowsFromSnapshot(editQuotation.snapshot, search.toLowerCase().trim(), searchBy)
-        : buildTableRowsFromAggregated(rates, effectiveCountryFilter, vendorListForTable),
-    [editQuotation, rates, effectiveCountryFilter, vendorListForTable, search, searchBy, uploadById]
+        : buildTableRowsFromAggregated(rates, expandedCountryFilter, vendorListForTable),
+    [editQuotation, rates, expandedCountryFilter, vendorListForTable, search, searchBy, uploadById]
   );
 
   const tableRowsFilteredByMaster = useMemo(() => {
@@ -1184,9 +1408,21 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
     return tableRows.filter((r) => r.fromMasterList !== false);
   }, [tableRows, onlyMasterListNetworks]);
 
-  const totalPages = Math.max(1, Math.ceil(totalNetworkRows / pageSize));
-  const canPrev = page > 1;
-  const canNext = page < totalPages;
+  const rowsForNetworkSummaryDetail = useMemo(() => {
+    if (quotationTableFormat !== "network_summary") return [] as QuotationTableDataRow[];
+    if (editQuotation?.snapshot?.rows?.length) {
+      return tableRowsFilteredByMaster as QuotationTableDataRow[];
+    }
+    let rows = summaryFetchedRows;
+    if (onlyMasterListNetworks) rows = rows.filter((r) => r.fromMasterList !== false);
+    return rows;
+  }, [
+    quotationTableFormat,
+    editQuotation?.snapshot?.rows?.length,
+    tableRowsFilteredByMaster,
+    summaryFetchedRows,
+    onlyMasterListNetworks,
+  ]);
 
   /** Best = vendor + rate type with lowest rate among all selected columns. */
   const getBestVendorAndRateForRow = useCallback(
@@ -1232,17 +1468,54 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
   };
 
   /**
-   * Default sell when no manual override: markup applies on the selected rate (fixed adds; % on rate).
-   * Without markup, sell defaults to cost (rate + PSF).
+   * Default sell when no manual override: PSF stays in the stack (cost = rate + PSF).
+   * Fixed markup adds on top of rate; % markup applies to rate only, then PSF is added back.
+   * So a 0 rate still yields at least PSF when markup is % (previously rate*1.2 = 0 dropped PSF).
    */
   const defaultSellFromRate = useCallback(
     (rate: number, cost: number): number => {
       const m = appliedFees?.markupFee;
+      const psfPortion = Math.max(0, cost - rate);
       if (!m || m.value === 0) return cost;
-      return m.mode === "fixed" ? rate + m.value : rate * (1 + m.value / 100);
+      if (m.mode === "fixed") return rate + m.value + psfPortion;
+      return rate * (1 + m.value / 100) + psfPortion;
     },
     [appliedFees]
   );
+
+  const networkSummaryRows = useMemo(() => {
+    if (quotationTableFormat !== "network_summary") return [] as NetworkSummaryRow[];
+    return buildNetworkSummaryRows(rowsForNetworkSummaryDetail, selectedColumnsList, {
+      valueFromRawRate: (raw) => {
+        const psf = getPsfAmount(raw);
+        const cost = raw + psf;
+        return defaultSellFromRate(raw, cost);
+      },
+    });
+  }, [
+    quotationTableFormat,
+    rowsForNetworkSummaryDetail,
+    selectedColumnsList,
+    appliedFees,
+    defaultSellFromRate,
+  ]);
+
+  const effectivePaginationTotal =
+    quotationTableFormat === "network_summary" ? networkSummaryRows.length : totalNetworkRows;
+
+  const effectiveTotalPages = Math.max(1, Math.ceil(effectivePaginationTotal / pageSize));
+
+  const displaySummaryRows = useMemo(() => {
+    const start = (page - 1) * pageSize;
+    return networkSummaryRows.slice(start, start + pageSize);
+  }, [networkSummaryRows, page, pageSize]);
+
+  const quotationTableBusy =
+    ratesLoading || (quotationTableFormat === "network_summary" && summaryFormatLoading && !editQuotationId);
+
+  const totalPages = effectiveTotalPages;
+  const canPrev = page > 1;
+  const canNext = page < totalPages;
 
   /** Incremental markup on the selected rate (fixed value, or rate × %). */
   const getMarkupAmountOnRate = useCallback(
@@ -1377,15 +1650,29 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
 
   const useQuotationCountryRowSpan = quotationTableSort === null;
 
-  const quotationCountryRowKey = (r: { country: string }) => (r.country ?? "").trim();
+  const quotationCountryRowKey = (r: { country: string }) =>
+    quotationCountryCanonicalKey(r.country ?? "");
 
   const distinctCountriesInTable = useMemo(
-    () => new Set(tableRows.map((r) => (r.country ?? "").trim()).filter(Boolean)).size,
-    [tableRows]
+    () =>
+      new Set(tableRows.map((r) => quotationCountryCanonicalKey(r.country ?? "")).filter(Boolean))
+        .size,
+    [tableRows],
   );
 
   const quotationPaginationFooter = useMemo(() => {
-    const shown = Math.min(page * pageSize, totalNetworkRows) - (page - 1) * pageSize;
+    const total =
+      quotationTableFormat === "network_summary" ? networkSummaryRows.length : totalNetworkRows;
+    const shown = Math.min(page * pageSize, Math.max(total, 0)) - (page - 1) * pageSize;
+    if (quotationTableFormat === "network_summary") {
+      return {
+        shown,
+        total,
+        unit: "rows" as const,
+        title:
+          "Country summary: rows grouped by base country (text before first hyphen, e.g. ARGENTINA-CORDOBA → ARGENTINA) + line type; ISO when the base name matches ISO English; Min/Max/Avg = default sell (rate + PSF + markup); Prefixes = distinct prefix count.",
+      };
+    }
     if (editQuotationId) {
       return {
         shown,
@@ -1401,7 +1688,15 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
       title:
         "Pagination is by network row (each line is a country + network + rate type + rate from the uploads).",
     };
-  }, [editQuotationId, page, pageSize, totalNetworkRows, distinctCountriesInTable]);
+  }, [
+    quotationTableFormat,
+    networkSummaryRows.length,
+    editQuotationId,
+    page,
+    pageSize,
+    totalNetworkRows,
+    distinctCountriesInTable,
+  ]);
 
   if (loading) {
     return (
@@ -1533,7 +1828,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                               checked={selectedCountries.has(c)}
                               onCheckedChange={() => toggleCountry(c)}
                             />
-                            {c}
+                            {quotationCountryPickerLabel(c)}
                           </label>
                         ))}
                         {filteredCountries.length === 0 && (
@@ -1710,19 +2005,36 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
           <Button onClick={handleApply} size="sm" className="h-8 shrink-0">
             Apply
           </Button>
-          <div className="flex items-center gap-2 shrink-0 max-w-[14rem]">
-            <Checkbox
-              id="only-master-list-networks"
-              checked={onlyMasterListNetworks}
-              onCheckedChange={(v) => setOnlyMasterListNetworks(v === true)}
-            />
-            <Label
-              htmlFor="only-master-list-networks"
-              className="text-xs text-muted-foreground font-normal cursor-pointer leading-snug"
-              title="When on, hides rows whose network is not in the Master List"
-            >
-              Only Master List networks
-            </Label>
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 shrink-0">
+            <div className="flex items-center gap-2 shrink-0 max-w-[14rem]">
+              <Checkbox
+                id="only-master-list-networks"
+                checked={onlyMasterListNetworks}
+                onCheckedChange={(v) => setOnlyMasterListNetworks(v === true)}
+              />
+              <Label
+                htmlFor="only-master-list-networks"
+                className="text-xs text-muted-foreground font-normal cursor-pointer leading-snug"
+                title="When on, hides rows whose network is not in the Master List"
+              >
+                Only Master List networks
+              </Label>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <Label className="text-xs text-muted-foreground whitespace-nowrap">Table format</Label>
+              <Select
+                value={quotationTableFormat}
+                onValueChange={(v) => setQuotationTableFormat(v as "comparison" | "network_summary")}
+              >
+                <SelectTrigger className="h-8 text-xs w-[200px]">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="comparison">Comparison (current)</SelectItem>
+                  <SelectItem value="network_summary">Country summary</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
           </div>
         </div>
       </div>
@@ -1960,7 +2272,13 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                 size="icon"
                 className="h-8 w-8"
                 onClick={() => void handleExportXlsx()}
-                disabled={selectedColumnsList.length === 0 || totalNetworkRows === 0 || exportingOrSaving}
+                disabled={
+                  selectedColumnsList.length === 0 ||
+                  exportingOrSaving ||
+                  (quotationTableFormat === "network_summary"
+                    ? networkSummaryRows.length === 0 || summaryFormatLoading
+                    : totalNetworkRows === 0)
+                }
                 aria-label="Export XLSX"
               >
                 <FileDown className="w-3.5 h-3.5" />
@@ -1970,20 +2288,99 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                 size="icon"
                 className="h-8 w-8"
                 onClick={() => setSaveDialogOpen(true)}
-                disabled={selectedColumnsList.length === 0 || totalNetworkRows === 0 || exportingOrSaving}
+                disabled={
+                  selectedColumnsList.length === 0 ||
+                  exportingOrSaving ||
+                  (quotationTableFormat === "network_summary"
+                    ? networkSummaryRows.length === 0 || summaryFormatLoading
+                    : totalNetworkRows === 0)
+                }
                 aria-label={editQuotationId ? "Update quotation" : "Save quotation"}
               >
                 <Save className="w-3.5 h-3.5" />
               </Button>
             </div>
           </div>
-          {ratesLoading && (
+          {quotationTableBusy && (
             <div className="absolute inset-0 flex items-center justify-center bg-background/60 z-20 rounded-2xl">
               <RefreshCw className="w-6 h-6 animate-spin text-muted-foreground" />
             </div>
           )}
           <div className="overflow-auto flex-1 min-h-0">
             <table className="w-full text-sm border-collapse">
+              {quotationTableFormat === "network_summary" ? (
+                <>
+                  <thead className="sticky top-0 z-10 bg-card">
+                    <tr className="border-b border-border">
+                      <th
+                        className={`text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide border-r border-border ${quotationStripeBg(0)}`}
+                      >
+                        Country
+                      </th>
+                      <th
+                        className={`text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide border-r border-border ${quotationStripeBg(0)}`}
+                      >
+                        ISO
+                      </th>
+                      <th
+                        className={`text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide border-r-2 border-border ${quotationStripeBg(0)}`}
+                      >
+                        Type
+                      </th>
+                      <th className={`text-right px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide border-r border-border ${quotationStripeBg(0)}`}>
+                        Min
+                      </th>
+                      <th className={`text-right px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide border-r border-border ${quotationStripeBg(0)}`}>
+                        Max
+                      </th>
+                      <th className={`text-right px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide border-r border-border ${quotationStripeBg(0)}`}>
+                        Avg
+                      </th>
+                      <th className={`text-right px-4 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide ${quotationStripeBg(0)}`}>
+                        Prefixes
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {displaySummaryRows.length === 0 ? (
+                      <tr>
+                        <td colSpan={7} className="px-4 py-8 text-center text-muted-foreground">
+                          {summaryFormatLoading && !editQuotationId
+                            ? "Loading summary…"
+                            : "No rows for this selection."}
+                        </td>
+                      </tr>
+                    ) : (
+                      displaySummaryRows.map((row, idx) => (
+                        <tr key={`${row.country}-${row.lineType}-${idx}`} className="border-b border-border hover:bg-muted/20">
+                          <td className={`px-4 py-2.5 font-medium border-r border-border ${quotationStripeBg(0)}`}>
+                            {row.country?.trim() ? quotationCountryPickerLabel(row.country) : "—"}
+                          </td>
+                          <td className={`px-4 py-2.5 font-mono text-muted-foreground text-xs border-r border-border ${quotationStripeBg(0)}`}>
+                            {row.isoCode ?? "—"}
+                          </td>
+                          <td className={`px-4 py-2.5 text-muted-foreground text-xs border-r-2 border-border ${quotationStripeBg(0)}`}>
+                            {row.lineType}
+                          </td>
+                          <td className={`px-4 py-2.5 font-mono text-right text-xs ${quotationStripeBg(0)}`}>
+                            {row.min != null ? formatRate(row.min) : "—"}
+                          </td>
+                          <td className={`px-4 py-2.5 font-mono text-right text-xs ${quotationStripeBg(0)}`}>
+                            {row.max != null ? formatRate(row.max) : "—"}
+                          </td>
+                          <td className={`px-4 py-2.5 font-mono text-right text-xs ${quotationStripeBg(0)}`}>
+                            {row.avg != null ? formatRate(row.avg) : "—"}
+                          </td>
+                          <td className={`px-4 py-2.5 text-right font-mono text-xs ${quotationStripeBg(0)}`}>
+                            {row.prefixCount}
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </>
+              ) : (
+                <>
               <thead className="sticky top-0 z-10 bg-card">
                 <tr className="border-b border-border">
                   <SortableNativeTh
@@ -2176,7 +2573,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                             rowSpan={useQuotationCountryRowSpan ? countrySpan : undefined}
                             className={`px-4 py-2.5 text-foreground align-middle border-r border-border font-medium ${quotationStripeBg(0)}`}
                           >
-                            {row.country?.trim() ? row.country : "—"}
+                            {row.country?.trim() ? quotationCountryPickerLabel(row.country) : "—"}
                           </td>
                         ) : null}
                         <td
@@ -2420,9 +2817,11 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                   })
                 )}
               </tbody>
+                </>
+              )}
             </table>
           </div>
-          {totalNetworkRows > 0 && (
+          {effectivePaginationTotal > 0 && (
             <div className="flex items-center justify-between gap-4 px-4 py-2 border-t border-border bg-muted/30 text-sm text-muted-foreground">
               <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
                 <span title={quotationPaginationFooter.title}>
@@ -2435,7 +2834,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                     </span>
                   ) : null}
                 </span>
-                {onlyMasterListNetworks && tableRows.length > 0 && (
+                {quotationTableFormat === "comparison" && onlyMasterListNetworks && tableRows.length > 0 && (
                   <span className="text-xs opacity-90">
                     ({displayQuotationRows.length} of {tableRows.length} rows on this page match Master List)
                   </span>
@@ -2448,7 +2847,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                 size="icon"
                 className="h-8 w-8"
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
-                disabled={!canPrev || ratesLoading}
+                disabled={!canPrev || quotationTableBusy}
                 aria-label="Previous page"
               >
                 <ChevronLeft className="w-4 h-4" />
@@ -2458,7 +2857,7 @@ export default function ComparacionCotizaciones({ editQuotationId, onSaved }: Co
                 size="icon"
                 className="h-8 w-8"
                 onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                disabled={!canNext || ratesLoading}
+                disabled={!canNext || quotationTableBusy}
                 aria-label="Next page"
               >
                 <ChevronRight className="w-4 h-4" />

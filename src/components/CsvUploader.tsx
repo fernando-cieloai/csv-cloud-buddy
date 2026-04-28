@@ -526,15 +526,12 @@ export default function CsvUploader({ vendorId, vendorName: vendorNameProp, onSu
       return;
     }
 
-    const prefixToCountry = new Map<string, string>();
     const masterCanonicalKeys = new Set<string>();
 
-    const addMasterMatch = (regionCode: unknown, countryName?: string | null) => {
+    const addMasterMatch = (regionCode: unknown) => {
       const key = canonicalPrefixForMasterMatch(String(regionCode ?? ""));
       if (!key) return;
       masterCanonicalKeys.add(key);
-      const cn = countryName?.trim();
-      if (cn) prefixToCountry.set(key, cn);
     };
 
     type RpcCanonRow = { region_code: string; country_name: string };
@@ -562,7 +559,7 @@ export default function CsvUploader({ vendorId, vendorName: vendorNameProp, onSu
         const chunk = vendorRawPrefixList.slice(i, i + EXACT_REGION_CODE_CHUNK);
         const { data: exactRows, error: exactErr } = await supabase
           .from("country_regions")
-          .select("region_code, countries(nombre)")
+          .select("region_code")
           .in("region_code", chunk);
         if (exactErr) {
           setParseErrors((prev) => [
@@ -573,9 +570,7 @@ export default function CsvUploader({ vendorId, vendorName: vendorNameProp, onSu
           return;
         }
         for (const r of exactRows ?? []) {
-          const rc = (r as { region_code: string }).region_code;
-          const cn = (r as { countries: { nombre: string } | null }).countries?.nombre;
-          addMasterMatch(rc, cn);
+          addMasterMatch((r as { region_code: string }).region_code);
         }
       }
     }
@@ -595,7 +590,7 @@ export default function CsvUploader({ vendorId, vendorName: vendorNameProp, onSu
           break;
         }
         for (const row of chunkRows as RpcCanonRow[]) {
-          addMasterMatch(row.region_code, row.country_name);
+          addMasterMatch(row.region_code);
         }
       }
     }
@@ -609,7 +604,7 @@ export default function CsvUploader({ vendorId, vendorName: vendorNameProp, onSu
       while (foundInMaster.size < vendorCanonSet.size) {
         const { data: crData, error: crErr } = await supabase
           .from("country_regions")
-          .select("region_code, countries(nombre)")
+          .select("region_code")
           .order("id", { ascending: true })
           .range(offset, offset + countryRegionsPage - 1);
         if (crErr) {
@@ -626,8 +621,6 @@ export default function CsvUploader({ vendorId, vendorName: vendorNameProp, onSu
           if (!canon || !vendorCanonSet.has(canon)) continue;
           masterCanonicalKeys.add(canon);
           foundInMaster.add(canon);
-          const country = (r as { countries: { nombre: string } | null }).countries?.nombre;
-          if (country) prefixToCountry.set(canon, country);
         }
         offset += crData.length;
       }
@@ -654,11 +647,7 @@ export default function CsvUploader({ vendorId, vendorName: vendorNameProp, onSu
       return compareText(a.prefix, b.prefix);
     });
 
-    const resolveCountry = (prefix: string, vendorCountry: string): string => {
-      const canon = canonicalPrefixForMasterMatch(prefix);
-      return prefixToCountry.get(canon) ?? vendorCountry;
-    };
-
+    /** Keep vendor file `country` as stored on `phone_rates`. Master list is only used for the missing-prefix report, not to overwrite country (that broke Excel vs quotation totals). */
     const rateRowKey = (country: string, network: string, prefix: string, rateType: string) =>
       `${country}\t${network}\t${prefix}\t${rateType}`;
 
@@ -668,7 +657,7 @@ export default function CsvUploader({ vendorId, vendorName: vendorNameProp, onSu
       let total = 0;
       for (let i = 0; i < rows.length; i += BATCH) {
         const batch = rows.slice(i, i + BATCH).map((row) => ({
-          country: resolveCountry(row.prefix, row.country),
+          country: row.country,
           network: row.network,
           prefix: row.prefix,
           rate: row.rate,
@@ -835,7 +824,7 @@ export default function CsvUploader({ vendorId, vendorName: vendorNameProp, onSu
     let skipped = 0;
 
     for (const row of data) {
-      const country = resolveCountry(row.prefix, row.country);
+      const country = row.country;
       const rate_type = row.rate_type ?? "International";
       const key = rateRowKey(country, row.network, row.prefix, rate_type);
       const existing = keyToExisting.get(key);

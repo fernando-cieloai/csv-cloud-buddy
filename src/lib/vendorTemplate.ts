@@ -28,6 +28,17 @@ export const QUOTATION_EXPORT_HEADERS = [
   "Next Increment",
 ] as const;
 
+/** Headers for country summary quotation export (grouped by country + line type). */
+export const QUOTATION_SUMMARY_EXPORT_HEADERS = [
+  "Country",
+  "ISO",
+  "Type",
+  "Min",
+  "Max",
+  "Avg",
+  "Prefixes",
+] as const;
+
 /** Default values for quotation snapshot when not set. */
 export const QUOTATION_DEFAULTS = {
   getEffectiveDate: () => new Date().toISOString().slice(0, 10),

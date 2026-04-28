@@ -11,8 +11,10 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "db:link": "supabase link --project-ref wrqyvvmdxexmyatnqiao",
-    "db:push": "supabase db push"
+    "db:link": "supabase link --project-ref gftiblryxponnqriqefc",
+    "db:push": "supabase db push",
+    "summary:phone-rates": "node scripts/print-phone-rates-summary.mjs",
+    "report:grete-summary": "node scripts/generate-grete-country-line-summary.mjs"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",
@@ -50,6 +52,7 @@
     "cmdk": "^1.1.1",
     "date-fns": "^3.6.0",
     "embla-carousel-react": "^8.6.0",
+    "i18n-iso-countries": "^7.14.0",
     "input-otp": "^1.4.2",
     "lucide-react": "^0.462.0",
     "next-themes": "^0.3.0",

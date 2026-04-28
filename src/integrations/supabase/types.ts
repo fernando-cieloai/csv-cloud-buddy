@@ -264,6 +264,31 @@ export type Database = {
         }
         Relationships: []
       }
+      phone_rates_with_country_iso: {
+        Row: {
+          id: string
+          upload_id: string
+          country: string
+          network: string
+          prefix: string
+          rate: number
+          rate_type: string
+          comment: string | null
+          created_at: string
+          country_iso: string | null
+          country_match_key: string
+        }
+        Insert: never
+        Update: never
+        Relationships: [
+          {
+            foreignKeyName: "phone_rates_upload_id_fkey"
+            columns: ["upload_id"]
+            referencedRelation: "csv_uploads"
+            referencedColumns: ["id"]
+          }
+        ]
+      }
     }
     Functions: {
       [_ in never]: never
